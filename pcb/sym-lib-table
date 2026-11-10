@@ -1,0 +1,4 @@
+(sym_lib_table
+	(version 7)
+	(lib (name "tile")(type "KiCad")(uri "${KIPRJMOD}/tile.kicad_sym")(options "")(descr "project symbols"))
+)

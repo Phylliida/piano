@@ -1,0 +1,93 @@
+switch_model,source_url,pack_size,pack_price_usd,per_unit_usd,verified_via,stock
+Wooting Lekker Linear60 (L60) v2,https://wooting.io/product/lekker-switch-l60-v2,20,9.99,0.4995,Shopify Storefront GraphQL checkout-us.wooting.io,in stock
+Wooting Lekker Linear60 (L60) v2,https://wooting.io/product/lekker-switch-l60-v2,70,29.99,0.4284,Shopify Storefront GraphQL checkout-us.wooting.io,in stock
+Wooting Lekker Linear60 (L60) v2.5,https://wooting.io/product/lekker-switch-l60-v2,70,29.99,0.4284,Shopify Storefront GraphQL checkout-us.wooting.io,in stock
+Wooting Lekker Linear60 (L60) v2,https://wooting.io/product/lekker-switch-l60-v2,90,39.99,0.4443,Shopify Storefront GraphQL checkout-us.wooting.io,out of stock
+Wooting Lekker Linear60 (L60) v2.5,https://wooting.io/product/lekker-switch-l60-v2,90,39.99,0.4443,Shopify Storefront GraphQL checkout-us.wooting.io,in stock
+Wooting Lekker Linear45 (L45) v2/v2.5,https://wooting.io/product/lekker-switch-l45-v2,70,29.99,0.4284,Shopify Storefront GraphQL checkout-us.wooting.io,in stock
+Wooting Lekker Linear45 (L45) v2/v2.5,https://wooting.io/product/lekker-switch-l45-v2,90,39.99,0.4443,Shopify Storefront GraphQL checkout-us.wooting.io,in stock
+Wooting Lekker Tikken Medium,https://wooting.io/product/wooting-lekker-tikken-medium-switch,20,11.99,0.5995,Shopify Storefront GraphQL checkout-us.wooting.io,in stock
+Wooting Lekker Tikken Medium,https://wooting.io/product/wooting-lekker-tikken-medium-switch,70,39.99,0.5713,Shopify Storefront GraphQL checkout-us.wooting.io,in stock
+Wooting Lekker Tikken Medium,https://wooting.io/product/wooting-lekker-tikken-medium-switch,90,49.99,0.5554,Shopify Storefront GraphQL checkout-us.wooting.io,in stock
+Wooting Lekker Tikken Light,https://wooting.io/product/wooting-lekker-tikken-light-switch,20,11.99,0.5995,Shopify Storefront GraphQL checkout-us.wooting.io,in stock
+Wooting Lekker Tikken Light,https://wooting.io/product/wooting-lekker-tikken-light-switch,70,39.99,0.5713,Shopify Storefront GraphQL checkout-us.wooting.io,in stock
+Wooting Lekker Tikken Light,https://wooting.io/product/wooting-lekker-tikken-light-switch,90,49.99,0.5554,Shopify Storefront GraphQL checkout-us.wooting.io,in stock
+Wooting Lekker Tikken Medium,https://mechanicalkeyboards.com/products/wooting-lekker-tikken-magnetic-switch,70,40.00,0.5714,Shopify products.json,in stock
+Wooting Lekker Tikken Medium,https://mechanicalkeyboards.com/products/wooting-lekker-tikken-magnetic-switch,90,50.00,0.5556,Shopify products.json,out of stock
+Gateron Aurora Dual Rail Magnetic Linear (KS-G210),https://mechanicalkeyboards.com/products/gateron-aurora-dual-rail-magnetic-linear-switches,110,35.00,0.3182,Shopify products.json + ld+json availability,in stock
+Gateron Aurora Dual Rail Magnetic Linear (KS-G210),https://mechanicalkeyboards.com/products/gateron-aurora-dual-rail-magnetic-linear-switches,45,16.00,0.3556,Shopify products.json,out of stock
+Gateron Dawn Dual Rail Magnetic Linear (KS-G208),https://mechanicalkeyboards.com/products/gateron-dawn-dual-rail-magnetic-linear-switches,110,35.00,0.3182,Shopify products.json,out of stock
+Gateron Dawn Dual Rail Magnetic Linear (KS-G208),https://mechanicalkeyboards.com/products/gateron-dawn-dual-rail-magnetic-linear-switches,45,12.00,0.2667,Shopify products.json,out of stock
+Gateron Nebula Dual-Rail 40g Linear Magnetic HE (KS-G209),https://mechanicalkeyboards.com/products/gateron-nebula-dual-rail-40g-linear-magnetic-he-switches,110,35.00,0.3182,Shopify products.json,out of stock
+Gateron Nebula Dual-Rail 40g Linear Magnetic HE (KS-G209),https://mechanicalkeyboards.com/products/gateron-nebula-dual-rail-40g-linear-magnetic-he-switches,45,16.00,0.3556,Shopify products.json,out of stock
+Gateron Magnetic Jade Ultra HE (KS-20GFW10B045NW-Y106),https://mechanicalkeyboards.com/products/gateron-magnetic-jade-ultra-he-plate-mount-switch,1,0.80,0.80,Shopify products.json + ld+json availability,in stock
+Gateron Magnetic Jade Pro Dual-SMD (KS-20LF10B045NW-G53),https://mechanicalkeyboards.com/products/gateron-magnetic-jade-pro-dual-smd-plate-mount-switch,1,0.85,0.85,Shopify products.json,in stock
+Gateron Magnetic Jade Delta (KS-20JDW10B045NW-G49L/G49D),https://mechanicalkeyboards.com/products/gateron-magnetic-jade-delta-linear-plate-mount-switch,1,1.40,1.40,Shopify products.json,in stock
+Gateron Magnetic Jade Attraction (KS-20CFW10B030NW-Y124),https://mechanicalkeyboards.com/products/gateron-magnetic-jade-attraction-linear-plate-mount-switch,1,0.85,0.85,Shopify products.json,in stock
+Gateron Magnetic Jade Air (KS-20SF10B045NW-D378),https://mechanicalkeyboards.com/products/gateron-magnetic-jade-air-linear-switch,1,0.62,0.62,Shopify products.json,in stock
+Gateron Magnetic Jade Sapphire (KS-20SR10B045NW-D452),https://mechanicalkeyboards.com/products/gateron-magnetic-jade-sapphire-switch,1,0.85,0.85,Shopify products.json,in stock
+Gateron Magnetic Jade Emerald Tactile (KS-20QDW10B055NW-Y121),https://mechanicalkeyboards.com/products/gateron-magnetic-jade-emerald-tactile-switch,1,0.85,0.85,Shopify products.json,in stock
+Gateron Magnetic Jade Ruby (KS-20TH10B045NW-Y113),https://mechanicalkeyboards.com/products/gateron-magnetic-jade-ruby-linear-plate-mount-switch,1,1.20,1.20,Shopify products.json,in stock
+Gateron Magnetic Green Dragon (KS-20TDW10B045NW-D335),https://mechanicalkeyboards.com/products/gateron-magnetic-green-dragon-linear-plate-mount-switch,1,0.85,0.85,Shopify products.json,in stock
+Gateron Magnetic Orchid 30g (KS-20UNW10B045NW-P18),https://mechanicalkeyboards.com/products/gateron-orchid-30g-linear-magnetic-he-switch,1,0.85,0.85,Shopify products.json,in stock
+Gateron Magnetic Spark 33g Pink (KS-20FFHW10B045NW-D432),https://mechanicalkeyboards.com/products/gateron-magnetic-spark-33g-linear-he-switch,1,0.69,0.69,Shopify products.json,in stock
+Gateron Magnetic Spark 33g Orange (KS-20FOW10B045NW-D433),https://mechanicalkeyboards.com/products/gateron-magnetic-spark-33g-linear-he-switch,1,1.70,1.70,Shopify products.json,in stock
+Gateron Moonlight Magnetic Linear (KS-20TF10B045NW-D370),https://mechanicalkeyboards.com/products/gateron-moonlight-magnetic-linear-switch,1,0.49,0.49,Shopify products.json,in stock
+Gateron Apollo Magnetic Linear (KA-06NDYW10B045NW-D386),https://mechanicalkeyboards.com/products/gateron-apollo-magnetic-linear-switch,1,0.57,0.57,Shopify products.json,in stock
+Gateron KS-20 Dual-Rail Orange 30g (KS-20U010B045NW-X14),https://mechanicalkeyboards.com/products/gateron-ks-20-dual-rail-orange-30g-linear-magnetic,1,0.52,0.52,Shopify products.json,in stock
+TTC KTEK New Star Magnetic,https://mechanicalkeyboards.com/products/ttc-ktek-new-star-magnetic-switch,1,0.27,0.27,Shopify products.json + ld+json availability,in stock
+TTC Uranus Standard Plate Mount Magnetic HE,https://mechanicalkeyboards.com/products/ttc-uranus-standard-plate-mount-magnetic-he-switch,1,0.51,0.51,Shopify products.json,in stock
+TTC Elf King Magnetic HE,https://mechanicalkeyboards.com/products/ttc-elf-king-plate-mount-magnetic-he-switch,1,0.54,0.54,Shopify products.json,in stock
+TTC Snow Magnetic HE,https://mechanicalkeyboards.com/products/ttc-snow-plate-mount-magnetic-he-switch,1,0.81,0.81,Shopify products.json,in stock
+TTC Dragon Lord Magnetic HE,https://mechanicalkeyboards.com/products/ttc-dragon-lord-plate-mount-magnetic-he-switch,1,0.84,0.84,Shopify products.json,in stock
+TTC POM King Magnetic HE,https://mechanicalkeyboards.com/products/ttc-pom-king-plate-mount-magnetic-he-switch,1,0.89,0.89,Shopify products.json,in stock
+TTC Flip King Magnetic HE,https://mechanicalkeyboards.com/products/ttc-flip-king-plate-mount-magnetic-he-switch,1,1.18,1.18,Shopify products.json,in stock
+TTC White Horse RGB Magnetic HE,https://mechanicalkeyboards.com/products/ttc-white-horse-rgb-plate-mount-magnetic-he-switch,1,1.49,1.49,Shopify products.json,in stock
+TTC Black Horse RGB Magnetic HE,https://mechanicalkeyboards.com/products/ttc-black-horse-rgb-plate-mount-magnetic-he-switch,1,1.49,1.49,Shopify products.json,in stock
+HMX Crystal Magnetic HE (HMX_CrystalHE),https://mechanicalkeyboards.com/products/hmx-crystal-magnetic-he-plate-mount-switch,1,0.40,0.40,Shopify products.json + ld+json availability,in stock
+KTT Aqua Prime Magnetic Linear,https://mechanicalkeyboards.com/products/ktt-aqua-prime-magnetic-linear-plate-mount-switch,1,0.69,0.69,Shopify products.json,in stock
+KTT Nebula Magnetic Linear (KTT-SW-NEBMAG),https://mechanicalkeyboards.com/products/ktt-nebula-magnetic-linear-plate-mount-switch,1,0.55,0.55,Shopify products.json,in stock
+Owlab Ti HE Magnetic Linear,https://mechanicalkeyboards.com/products/owlab-ti-he-linear-switch,1,0.48,0.48,Shopify products.json,in stock
+Outemu Peach V3 Pro Magnetic Silent,https://lumekeebs.com/products/outemu-peach-v3-pro-magnetic-silent-switches-10pcs,10,2.50,0.25,Shopify products.json,not checked
+Gravastar UFO Magnetic Linear (10pcs bag),https://lumekeebs.com/products/gravastar-ufo-magnetic-linear-switches-10pcs,10,14.95,1.495,Shopify products.json,in stock
+Gravastar UFO Magnetic Linear (65pcs jar),https://lumekeebs.com/products/gravastar-ufo-magnetic-linear-switches-10pcs,65,79.95,1.23,Shopify products.json,in stock
+Gateron Magnetic Jade Attraction,https://lumekeebs.com/products/gateron-magnetic-jade-attraction-linear-switches-10pcs,10,6.80,0.68,Shopify products.json,in stock
+Gateron Magnetic Jade Silent,https://lumekeebs.com/products/gateron-magnetic-jade-silent-linear-switches-10pcs,10,6.40,0.64,Shopify products.json,in stock
+Gateron Magnetic Jade Ultra,https://lumekeebs.com/products/gateron-magnetic-jade-ultra-hall-effect-linear-switches-10pcs,10,6.40,0.64,Shopify products.json,in stock
+Gateron Magnetic Jade Pro,https://lumekeebs.com/products/gateron-magnetic-jade-pro-switches-10pcs,10,7.00,0.70,Shopify products.json,not checked
+Gateron Magnetic Jade,https://lumekeebs.com/products/gateron-magnetic-jade-switches-10pcs,10,8.00,0.80,Shopify products.json,not checked
+Gateron Magnetic Orchid,https://lumekeebs.com/products/gateron-magnetic-orchid-hall-effect-linear-switches-10pcs,10,6.99,0.699,Shopify products.json,in stock
+Gateron Magnetic Spark,https://lumekeebs.com/products/gateron-magnetic-spark-hall-effect-linear-switches-10pcs,10,11.99,1.199,Shopify products.json,in stock
+Owlab Ti HE,https://lumekeebs.com/products/owlab-ti-he-magnetic-linear-switches-10pcs,10,4.80,0.48,Shopify products.json,not checked
+Gateron Magnetic Jade Pro,https://cannonkeys.com/products/gateron-magnetic-jade-pro-linear-switches,36,28.80,0.80,Shopify products.json,in stock
+Gateron Magnetic Apollo,https://cannonkeys.com/products/gateron-magnetic-apollo-linear-switch,36,25.20,0.70,Shopify products.json,in stock
+Gateron Magnetic Moonlight,https://cannonkeys.com/products/gateron-magnetic-moonlight-linear-switch,36,21.60,0.60,Shopify products.json,in stock
+Gateron Magnetic Jade,https://keebsforall.com/products/gateron-magnetic-jade-linear-switches,1,0.80,0.80,Shopify products.json,in stock
+Gateron Magnetic Orange,https://keebsforall.com/products/gateron-magnetic-orange-linear-switches,1,0.71,0.71,Shopify products.json,in stock
+Gateron Magnetic Jade Pro (Magnetic Switches x 65),https://kbdfans.com/products/magnetic-switches-x-65,65,52.00,0.80,Shopify products.json,in stock
+Gateron Magnetic Jade Ultra Dual-Drive Modular,https://kbdfans.com/products/gateron-magnetic-jade-ultra-dual-drive-modular-switch-set,10,8.00,0.80,Shopify products.json,in stock
+Gateron Magnetic Jade Pro Dual-SMD,https://kbdfans.com/products/gateron-magnetic-jade-pro-dual-smd-switch-set,10,8.50,0.85,Shopify products.json,in stock
+Gateron Magnetic Jade Delta,https://kbdfans.com/products/gateron-magnetic-jade-delta-switch-set,10,14.00,1.40,Shopify products.json,in stock
+AGS Radiant HE Magnetic,https://kbdfans.com/products/ags-radiant-he-magnetic-switches,10,3.80,0.38,Shopify products.json,in stock
+UR ICE Magnetic R2,https://kbdfans.com/products/ur-ice-magnetic-r2-switches,10,3.50,0.35,Shopify products.json,in stock
+Mount Tai GT HE Magnetic,https://kbdfans.com/products/mount-tai-gt-he-magnetic-switches,10,7.00,0.70,Shopify products.json,in stock
+Gateron Magnetic Jade Pro,https://divinikey.com/products/gateron-magnetic-jade-pro-he-switches,18,11.52,0.64,Shopify products.json,in stock
+Gateron Magnetic Jade Ultra,https://divinikey.com/products/gateron-magnetic-jade-ultra-he-switches,18,14.40,0.80,Shopify products.json,in stock
+Gateron Magnetic Jade Delta,https://divinikey.com/products/gateron-magnetic-jade-delta-he-switches,18,25.20,1.40,Shopify products.json,in stock
+Gateron Magnetic Jade Max,https://divinikey.com/products/gateron-magnetic-jade-max-he-switches,18,18.00,1.00,Shopify products.json,in stock
+Gateron Magnetic Jade Air,https://divinikey.com/products/gateron-magnetic-jade-air-he-switches,18,12.78,0.71,Shopify products.json,in stock
+Gateron Magnetic Jade Mini E,https://divinikey.com/products/gateron-magnetic-jade-mini-e-he-switches,18,11.16,0.62,Shopify products.json,in stock
+Gateron Magnetic Orange 2.0,https://divinikey.com/products/gateron-magnetic-orange-2-0-linear-switches,18,9.00,0.50,Shopify products.json,in stock
+Gateron KS-20 Magnetic White,https://www.piifox.com/products/gateron-magnetic-white,10,19.40,1.94,Shopify products.json,in stock
+Gateron KS-20 Magnetic White,https://www.piifox.com/products/gateron-magnetic-white,35,67.90,1.94,Shopify products.json,in stock
+Gateron Magnetic Jade Pro,https://www.piifox.com/products/gateron-magnetic-jade-pro,61,56.12,0.92,Shopify products.json,in stock
+Gateron Magnetic Jade Pro,https://www.piifox.com/products/gateron-magnetic-jade-pro,70,64.40,0.92,Shopify products.json,in stock
+Gateron Magnetic Jade Pro,https://www.piifox.com/products/gateron-magnetic-jade-pro,90,82.80,0.92,Shopify products.json,in stock
+GEON Raw HE Magnetic,https://mechkeys.com/products/geon-raw-he-magnetic-switches,10,6.49,0.649,Shopify products.json,in stock
+PHYLINA Lightning Series Magnetic,https://mechkeys.com/products/phylina-lightning-series-magnetic-switch,61,25.99,0.426,Shopify products.json,in stock
+Kailh Ice Cream Magnetic,https://mechkeys.com/products/kailh-ice-cream-magnetic-switches,10,10.99,1.099,Shopify products.json,in stock
+HUANO OMEGA Magnetic,https://mechkeys.com/products/huano-omega-magnetic-switch,70,39.99,0.571,Shopify products.json,in stock
+TTC Mini Magneto Gaming Magnetic,https://mechkeys.com/products/ttc-mini-magneto-gaming-magnetic-switches,36,39.99,1.111,Shopify products.json,in stock
+Gateron Magnetic Jade Air HE,https://mechkeys.com/products/gateron-magnetic-jade-air-he-switch-set,10,10.99,1.099,Shopify products.json,in stock
+Kailh Galaxy Star/Moon Magnetic,https://mechkeys.com/products/kailh-galaxy-series-magnetic-switches,30,29.99,1.00,Shopify products.json,in stock
+Kailh Hyper Myth Magnetic,https://mechkeys.com/products/kailh-hyper-myth-magnetic-gaming-switches,10,7.99,0.799,Shopify products.json,in stock
