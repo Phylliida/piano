@@ -2,9 +2,10 @@
 """Shared geometry for one tile of the modular hex keyboard.
 
 The single source for every dimension that the PCB and the printed case have
-to agree on.  gen_case.py builds the case from it; gen_tile.py should place its
-footprints from it instead of keeping its own constants -- two copies of one
-fact is how the board and its netlist drifted apart before.
+to agree on.  gen_case.py builds the case from it and gen_pcb.py placed the
+board's footprints from it -- two copies of one fact is how the board and its
+netlist drifted apart before.  The board is routed now, so whatever it was
+built on (the outline, the peg holes, the ports, the posts) is frozen.
 
 Units are mm.  y points UP and the origin is the centre of key (col 0, row 0).
 KiCad's y points down: convert with to_kicad() when emitting a board.
@@ -33,9 +34,18 @@ The case -- no tools, no screws
 -------------------------------
 A printed tray (plate, ribs, walls) and a printed bottom cover.  The PCB drops
 in from below; the switch pegs through its holes locate it.  The cover's W edge
-tucks over a lip on the W wall, then its E edge swings up until two flexing
-catch beams click over bumps on the E wall.  Posts on the cover press the PCB
-up against the ribs.  To open: pry the cover's E edge down at a notch.
+tucks over a lip on the W wall, then its E edge swings up until its catch beams
+click over bumps on the E wall.  Posts on the cover press the PCB up against
+the ribs.  To open: pry a catch beam's tip down, at the notch in the wall.
+
+Tiles snap together, then the cables go in from underneath.  The stepped N/S
+edges interlock, so a tile can only be lowered into place: slots in its W and
+S walls slide down over dovetail rails on its neighbours' E and N walls, and a
+snap latch on each of those walls springs into a window in the tile.  So build
+outward from the south-west tile and take apart from the north-east one; a
+firm pull straight up releases the latches.  Then turn the keyboard over: at
+every port the cover and both walls are cut away, so a cable drops into an
+open channel that runs from one tile's header to the next one's.
 """
 
 import contextlib
@@ -61,8 +71,9 @@ _set_size(8, 5)                             # 40 keys = 5 x 8:1 muxes
 
 @contextlib.contextmanager
 def size(cols, rows):
-    """Temporarily re-size the tile -- e.g. a 2 x 2 test coupon that carries
-    every case feature at a fraction of the print time."""
+    """Temporarily re-size the tile -- e.g. the 2 x 4 test coupon, which carries
+    the cover's and the joints' features at a fraction of the print time.  The
+    size needs an entry in JOINT_SPOTS."""
     saved = COLS, ROWS
     _set_size(cols, rows)
     try:
@@ -102,24 +113,55 @@ PCB_CLEAR = 0.3         # PCB edge to the wall, or to the lip / bumps on W and E
 RIB_W = 2.0             # plate-to-PCB stiffening ribs
 SWITCH_CLEAR = 0.5      # rib to a switch's lower housing (= the cutout)
 
-# Bottom cover.
+# Bottom cover.  (The routed board's outline is built on LIP_W and CATCH_D.)
 COVER_CLEAR = 0.2       # cover edge to the wall's inner face
 LIP_W = 1.5             # W lip: how far it reaches under the cover
 CATCH_D = 0.9           # E bumps reach under the cover by CATCH_D - COVER_CLEAR;
                         # their retaining face is 45 degrees so a pry releases them
-CATCH_L = 12.0          # length of each bump along the edge
-BEAM_W = 2.0            # catch beam: the strip of cover that flexes past a bump
-BEAM_SLOT = 1.2         # slot that frees the beam from the rest of the cover
-BEAM_L = 40.0           # free length of each beam (shortened to fit small tiles)
-PRY_W = 8.0             # notch in the E wall's foot, to get a fingernail under the cover
+CATCH_L = 5.0           # length of each bump along the edge
+BEAM_W = 4.0            # catch beam: a strip of the cover's E edge cut free as a
+                        # cantilever, which flexes past a bump
+BEAM_SLOT = 1.2         # the cuts that free it from the rest of the cover
+PRY_W = 4.5             # notch in the E wall's foot at a beam's tip, to get a
+                        # fingernail or a screwdriver under it
 POST_D = 4.0            # posts that press the PCB against the ribs
 POST_PRELOAD = 0.2      # posts this much too tall, so the cover keeps pressure on
 POST_KEEPOUT = 4.0      # radius kept bare on the PCB's back around each post
 
-# Edge ports: a JST GH 6-pin side-entry header on the PCB's back at each edge,
-# its cable leaving through a slot in the wall between the PCB and the cover.
-PORT_SLOT_W = 14.0      # GH 6-pin header is 12.05 mm wide over its courtyard
-PORT_DEPTH = 6.5        # header courtyard, back of the pins to the opening
+# Edge ports: a JST GH 6-pin side-entry header on the PCB's back at each edge.
+# From the header out to the tile's edge the cover is cut away and the wall is
+# open down to the floor, so the cable is laid in from underneath.
+PORT_SLOT_W = 14.0      # channel width; the GH 6-pin header is 12.05 mm wide
+                        # over its courtyard
+CHANNEL_BACK = 1.5      # the cover's cut-out reaches this far behind the header's
+                        # opening, so the plug's lock can be seen and reached
+
+# Tile-to-tile joints.  Dovetail rails stand on the E and N walls' outer faces
+# and run in slots through the next tile's W and S walls, open at the floor.
+# One snap latch per seam stops that tile lifting off again: a strip of the
+# E / N wall, cut free from the plate down as a cantilever, with a hook on its
+# outer face that springs into a window in the neighbour's wall.
+RAIL_W = 5.0            # rail width at its own wall; its flanks spread at 45 degrees
+RAIL_REACH = 1.25       # how far it stands out: 0.25 short of the neighbour's
+                        # inner face, so it never touches a lip, cover or PCB
+RAIL_CLEAR = 0.15       # rail flank to slot flank, square to the flank
+RAIL_TOP = 3.0          # the rail's head ends this far below the plate top and
+                        # slopes back to the wall at 45 degrees: printable, and
+                        # it leads the slot on
+RAIL_FLARE = 0.8        # the slot's mouth at the floor, wider by this each side
+LATCH_W = 10.0          # latch beam: this much wall
+LATCH_SLIT = 1.0        # slit either side of it
+LATCH_TIP_T = 0.7       # the beam thins from WALL_T at its root to this at the
+                        # floor: spreads the bending, and clears the PCB's edge
+LATCH_LIFT = 0.3        # its end stops this short of the floor, clear of the table
+LATCH_BITE = 0.6        # hook's overlap with the neighbour's wall
+LATCH_ANGLE = 50.0      # its catch face, from the lifting direction.  THE knob:
+                        # 90 never lets go, 45 barely holds a hanging tile
+LATCH_PLAY = 0.2        # catch face to the window's edge, tile seated
+LATCH_FLAT = 0.3        # hook's crest
+LATCH_RAMP = 1.5        # height of its lead-in ramp (a ~30 degree overhang)
+LATCH_RELIEF = 1.0      # notch in the cover's edge, so the beam can swing in
+PLA_E = 3000.0          # MPa; only for the snap forces that check() reports
 
 # Parts under every key, on the PCB's back (tile coordinates, from the key
 # centre).  Every key is identical: the switch's LED window is LED_DY south of
@@ -299,51 +341,206 @@ def posts():
     return out
 
 
+# Hand-placed catches and joints, per tile size.  Along the E wall a place is a
+# y; along the N wall it is a column, and the feature sits mid-column.  The W
+# and S walls carry the matching slot or window at the same place.
+#   e_rails, n_rails    dovetail rails
+#   e_latch, n_latch    the seam's snap latch
+#   catches             (y_root, y_tip) of each catch beam on the cover's E edge
+# 8 x 5: the E port's channel splits the cover's E edge, so a beam ends either
+# side of it, tips toward the port.  2 x 4 is the test coupon: the southern
+# half of the tile's E wall, and two columns of its N wall.  check() proves
+# that nothing here runs into a rib, a port, a wall's end or its neighbour.
+JOINT_SPOTS = {
+    (8, 5): {"e_rails": (6.0, 100.0), "e_latch": 33.0, "n_rails": (0, 7), "n_latch": 3,
+             "catches": ((40.0, 70.33), (114.5, 84.33))},
+    (2, 4): {"e_rails": (6.0, 76.5), "e_latch": 33.0, "n_rails": (0,), "n_latch": 1,
+             "catches": ((40.0, 70.33),)},
+}
+
+
+def _joints():
+    try:
+        return JOINT_SPOTS[COLS, ROWS]
+    except KeyError:
+        raise ValueError("no catches and joints laid out for a %d x %d tile: "
+                         "add it to JOINT_SPOTS" % (COLS, ROWS)) from None
+
+
 def catch_beams():
-    """[(y_centre, free_length)] of the flexing beams along the cover's E edge:
-    two on a long edge, one on a short one."""
-    _, lo, hi = side(cover_outline(), "E")
-    span = hi - lo
-    if span >= 2 * BEAM_L + 20:
-        return [(lo + span / 4, BEAM_L), (lo + 3 * span / 4, BEAM_L)]
-    return [((lo + hi) / 2, min(BEAM_L, span - 6 - BEAM_SLOT))]
+    """[(y_root, y_tip)] of the catch beams: cantilevers cut from the cover's
+    E edge, BEAM_W wide."""
+    return list(_joints()["catches"])
 
 
-def beam_slots():
-    """Stadium slots, as (x_centre, y_centre, length incl. round ends, width)."""
+def _from_tip(beam, a, b):
+    """(y0, y1) of the stretch from a to b behind a beam's tip, toward its root
+    (negative: beyond the tip)."""
+    root, tip = beam
+    d = math.copysign(1.0, tip - root)
+    return tuple(sorted((tip - d * a, tip - d * b)))
+
+
+def beam_cuts():
+    """Per beam, the two cuts that free it from the cover, as rectangles: a
+    slot along its inner side (gen_case.py rounds its ends) and a cut across
+    its tip."""
     x_e = side(cover_outline(), "E")[0]
-    return [(x_e - BEAM_W - BEAM_SLOT / 2, y, L + BEAM_SLOT, BEAM_SLOT)
-            for y, L in catch_beams()]
-
-
-def catch_bumps():
-    """(y0, y1) of each bump on the E wall, at the middle of its beam."""
-    return [(y - CATCH_L / 2, y + CATCH_L / 2) for y, _ in catch_beams()]
+    out = []
+    for beam in catch_beams():
+        y0, y1 = _from_tip(beam, -BEAM_SLOT, abs(beam[1] - beam[0]))
+        e0, e1 = _from_tip(beam, -BEAM_SLOT, 0.0)
+        out.append(((x_e - BEAM_W - BEAM_SLOT, y0, x_e - BEAM_W, y1),
+                    (x_e - BEAM_W - BEAM_SLOT / 2, e0, x_e + 1.0, e1)))
+    return out
 
 
 def pry_notches():
-    """(y0, y1) of each pry notch in the E wall's foot, beside its bump."""
-    return [(y1 + 1.0, y1 + 1.0 + PRY_W) for _, y1 in catch_bumps()]
+    """(y0, y1) of the notch in the E wall's foot at each beam's tip."""
+    return [_from_tip(b, -BEAM_SLOT, PRY_W - BEAM_SLOT) for b in catch_beams()]
 
 
-def _header_gaps(col):
-    """Gap centres in column col with room for a port header: no cover post.
-    Falls back to any gap on tiles too small to have a choice."""
-    x = col * COL_PITCH
-    gaps = [key_xy(col, r)[1] + ROW_PITCH / 2 for r in range(ROWS - 1)]
-    taken = [y for px, y in posts() if abs(px - x) < 1e-6]
-    ok = [y for r, y in enumerate(gaps)
-          if all(abs(y - t) > 1e-6 for t in taken)]
-    return ok or gaps
+def catch_bumps():
+    """(y0, y1) of each bump on the E wall: just behind its beam's pry notch."""
+    near = PRY_W - BEAM_SLOT + 0.5
+    return [_from_tip(b, near, near + CATCH_L) for b in catch_beams()]
 
 
+def catch_strain():
+    """Peak strain in each catch beam as it rides over its bump.  A cantilever
+    pushed aside by d at distance a from its root: 1.5 * d * w / a^2.  The
+    bump is straight and the bent beam is not, so it bears on the bump's
+    root-side end."""
+    return [1.5 * (CATCH_D - COVER_CLEAR) * BEAM_W / min(abs(y - root) for y in bump) ** 2
+            for (root, _), bump in zip(catch_beams(), catch_bumps())]
+
+
+# ------------------------------------------------------------------- joints ---
+# A joint is drawn in its seam's frame: n is the distance outward from the
+# outer face of the wall that carries the rails, t runs along the wall.  On E
+# and N that wall is this tile's; on W and S it is the neighbour's, SEAM_GAP
+# away, and this tile's own wall is n = SEAM_GAP .. SEAM_GAP + WALL_T.  Either
+# way n points toward +x or +y.
+OPPOSITE = {"E": "W", "W": "E", "N": "S", "S": "N"}
+
+
+def flat(poly, edge, t=0.0):
+    """(position, lo, hi) of one straight stretch of a tile-shaped outline: the
+    whole W or E edge, or on N and S the flat of the column at x = t.  Relies
+    on the corner order of outline()."""
+    if edge in "WE":
+        return side(poly, edge)
+    col = round(t / COL_PITCH)
+    k = 2 * col if edge == "S" else 4 * COLS - 2 - 2 * col
+    (xa, y), (xb, _) = poly[k], poly[k + 1]
+    return y, min(xa, xb), max(xa, xb)
+
+
+def seam_face(edge, t=0.0):
+    """Where n = 0 lies for the seam on `edge` (at x = t, for N and S)."""
+    pos = flat(case_outer(), edge, t)[0]
+    return pos - SEAM_GAP if edge in "WS" else pos
+
+
+def seam_rect(edge, t, half, n0, n1):
+    """The rectangle t +/- half, n0 .. n1 of a seam frame, in tile coordinates."""
+    f = seam_face(edge, t)
+    if edge in "WE":
+        return f + n0, t - half, f + n1, t + half
+    return t - half, f + n0, t + half, f + n1
+
+
+def seam_span(edge, t=0.0):
+    """(lo, hi) along the wall: where this tile's wall and the one facing it
+    across the seam are both flat, on their inner faces."""
+    a, b = flat(case_inner(), edge, t), flat(case_inner(), OPPOSITE[edge], t)
+    return max(a[1], b[1]), min(a[2], b[2])
+
+
+def rails():
+    """{edge: [t]}: the dovetail rails on the E wall (t = y) and the N wall
+    (t = x).  The slots they run in are at the same t on W and S."""
+    j = _joints()
+    return {"E": list(j["e_rails"]), "N": [c * COL_PITCH for c in j["n_rails"]]}
+
+
+def latches():
+    """{edge: [t]}: the snap latches on E and N; their windows are at the same
+    t on W and S."""
+    j = _joints()
+    return {"E": [j["e_latch"]], "N": [j["n_latch"] * COL_PITCH]}
+
+
+def rail_half(n):
+    """Half-width of a rail at n: its flanks spread at 45 degrees."""
+    return RAIL_W / 2 + n
+
+
+def slot_half(n):
+    """Half-width of a rail's slot at n: RAIL_CLEAR off the rail's flank."""
+    return rail_half(n) + RAIL_CLEAR * math.sqrt(2)
+
+
+def rail_slot_top():
+    """z of a slot's closed end: RAIL_CLEAR above the rail's bevel where that
+    is highest inside the slot, at the wall's outer face.  It is what stops a
+    tile sinking below its neighbours when the keyboard is carried."""
+    return -(RAIL_TOP - RAIL_REACH + SEAM_GAP - RAIL_CLEAR)
+
+
+def latch_hook():
+    """The hook's outline in the seam frame, [(n, z)] from its foot up: the
+    catch face, the crest, the lead-in ramp."""
+    cot = 1 / math.tan(math.radians(LATCH_ANGLE))
+    reach = SEAM_GAP + LATCH_BITE
+    z = -Z_COVER_BOT + LATCH_PLAY       # the catch face crosses the neighbour's outer face here
+    z0, z1 = z - SEAM_GAP * cot, z + LATCH_BITE * cot
+    return [(0.0, z0), (reach, z1), (reach, z1 + LATCH_FLAT),
+            (0.0, z1 + LATCH_FLAT + LATCH_RAMP)]
+
+
+def latch_window():
+    """(z_lo, z_hi) of the window a hook springs into.  The rim of the wall
+    left below it, as tall as the lip, is what the hook holds."""
+    return -Z_COVER_BOT, latch_hook()[-1][1] + 0.3
+
+
+def latch_taper(z):
+    """How much thinner than WALL_T the latch beam is at height z."""
+    return (WALL_T - LATCH_TIP_T) * (-Z_PLATE - z) / (Z_FLOOR - Z_PLATE)
+
+
+def latch_flex(steps=400):
+    """The latch beam with its hook pushed in by LATCH_BITE, far enough to pass
+    the neighbour's wall: (peak strain, force on the hook in N if E = PLA_E,
+    how far the beam moves in at the PCB's back face).  A tapered cantilever
+    loaded at the hook's crest, integrated numerically."""
+    hook = latch_hook()
+    a = -(hook[1][1] + hook[2][1]) / 2 - Z_PLATE        # root to the crest
+    ds = a / steps
+    mids = [(k + 0.5) * ds for k in range(steps)]
+
+    def thick(s):
+        return WALL_T - latch_taper(-Z_PLATE - s)
+
+    def curv(s):                                        # per unit of force / E
+        return (a - s) / (LATCH_W * thick(s) ** 3 / 12)
+
+    def moved(at):
+        return sum(curv(s) * (at - s) for s in mids if s < at) * ds
+
+    load = LATCH_BITE / moved(a)                        # force / E
+    strain = max(load * curv(s) * thick(s) / 2 for s in mids)
+    return strain, load * PLA_E, load * moved(Z_PCB_BOT - Z_PLATE)
+
+
+# -------------------------------------------------------------------- ports ---
 # A header in a gap sits below the gap's centre: the free band runs from the
 # lower key's sensor up to the upper key's LED, which reaches further.
 PORT_GAP_DY = -2.3
 PLUG_PROTRUSION = 3.1   # a mated GHR plug sticks out this far past the header's
                         # face (JST eGH, mated drawing: 7.15 mm back to back,
                         # header body 4.05 mm), and its wire leaves straight back
-HEADER_FACE_INSET = 4.0  # header face to the PCB edge, when it faces that edge
 HEADER_FACE = 2.45      # footprint origin to the header's opening (KiCad's
                         # JST_GH_SM06B-GHS-TB footprint: body front at y = 2.45)
 CABLE_GAP = 50.0        # partner headers' openings this far apart across a seam,
@@ -354,66 +551,40 @@ CABLE_GAP = 50.0        # partner headers' openings this far apart across a seam
 # height and N/S on one column, each plug and its straight cable clear of
 # switch pegs, posts and parts, ending at a flat stretch of wall.  The N/S
 # column's posts move to the gaps the headers leave free.  Sizes not listed
-# here (the test coupon) fall back to the gap search in port_layout().
+# here (the test coupon) have no ports.
 PORT_SPOTS = {
     (8, 5): {"ew_y": 77.33, "w_x": 25.94, "ns_col": 4, "s_y": 18.58, "ns_post_gaps": (1, 2)},
 }
 
 
 def port_layout():
-    """{edge: {"slot": (x, y), "header": (x, y), "facing": (dx, dy)}}.
+    """{edge: {"slot": (x, y), "header": (x, y), "facing": (dx, dy)}} -- empty
+    for a tile size without hand-placed headers (PORT_SPOTS).
 
-    Tile sizes in PORT_SPOTS use their hand-placed headers, with partners
-    CABLE_GAP apart; the rest use the gap search below.
-
-    The JST GH cable lies in the 5 mm under the PCB and crosses the seam
-    through one slot in each tile's wall, so facing slots must line up: E and W
-    slots share a height, N and S slots share a column.  Each header sits in
-    the nearest gap between keys with room for it and its plug, opening toward
-    its slot; the cable bends from there to the slot, over low parts.
+    Each header opens toward its own edge, and its partner on the next tile is
+    CABLE_GAP away straight across the seam.  So facing channels line up: E
+    and W share a height, N and S share a column.  "slot" is where the cable
+    crosses the tile's edge.
 
     Neighbouring tiles' edge columns alternate in height, so wherever the E
-    header sits in a gap, the W slot of the next tile meets a key: the cable
-    passes under that key's switch peg (pegs reach ~1.4 mm below the board).
+    header sits in a gap, the W channel of the next tile meets a key: the
+    cable passes under that key's switch peg (pegs reach ~1.4 mm below the
+    board).
     """
     spot = PORT_SPOTS.get((COLS, ROWS))
-    if spot:
-        x_ns = spot["ns_col"] * COL_PITCH
-        lo, hi = _col_span(spot["ns_col"])
-        x_w, y = spot["w_x"], spot["ew_y"]
-        x_e = x_w - 2 * HEADER_FACE + PERIOD[0] - CABLE_GAP
-        y_s = spot["s_y"]
-        y_n = y_s - 2 * HEADER_FACE + PERIOD[1] - CABLE_GAP
-        return {
-            "E": {"slot": ((COLS - 0.5) * COL_PITCH, y), "header": (x_e, y), "facing": (1.0, 0.0)},
-            "W": {"slot": (-0.5 * COL_PITCH, y), "header": (x_w, y), "facing": (-1.0, 0.0)},
-            "N": {"slot": (x_ns, hi), "header": (x_ns, y_n), "facing": (0.0, 1.0)},
-            "S": {"slot": (x_ns, lo), "header": (x_ns, y_s), "facing": (0.0, -1.0)},
-        }
-    inset = SEAM_GAP / 2 + WALL_T + PCB_CLEAR
-    half = PORT_DEPTH / 2
-    # E: the header looks straight at its slot from the last column's best gap.
-    mid = (ROWS - 0.5) * ROW_PITCH / 2
-    y_ew = min(_header_gaps(COLS - 1), key=lambda y: abs(y - mid)) + PORT_GAP_DY
-    x_e = (COLS - 0.5) * COL_PITCH
-    e_head = (x_e - inset - CATCH_D - HEADER_FACE_INSET - half, y_ew)
-    # W: the first column has a key at that height, so its header sits in the
-    # nearest gap and looks along the edge toward the slot.
-    x_w = -0.5 * COL_PITCH
-    y_wg = min(_header_gaps(0), key=lambda y: abs(y - y_ew)) + PORT_GAP_DY
-    w_face = (0.0, math.copysign(1.0, y_ew - y_wg))
-    w_head = (x_w + inset + LIP_W + 6.5, y_wg)
-    # N and S: one middle even column; each header looks along the column to
-    # its edge from that column's highest / lowest roomy gap.
-    c = COLS // 2 - (COLS // 2) % 2
-    gaps = _header_gaps(c)
-    lo, hi = _col_span(c)
-    x_ns = c * COL_PITCH
+    if not spot:
+        return {}
+    x_ns = spot["ns_col"] * COL_PITCH
+    lo, hi = _col_span(spot["ns_col"])
+    x_w, y = spot["w_x"], spot["ew_y"]
+    x_e = x_w - 2 * HEADER_FACE + PERIOD[0] - CABLE_GAP
+    y_s = spot["s_y"]
+    y_n = y_s - 2 * HEADER_FACE + PERIOD[1] - CABLE_GAP
     return {
-        "E": {"slot": (x_e, y_ew), "header": e_head, "facing": (1.0, 0.0)},
-        "W": {"slot": (x_w, y_ew), "header": w_head, "facing": w_face},
-        "N": {"slot": (x_ns, hi), "header": (x_ns, max(gaps) + PORT_GAP_DY), "facing": (0.0, 1.0)},
-        "S": {"slot": (x_ns, lo), "header": (x_ns, min(gaps) + PORT_GAP_DY), "facing": (0.0, -1.0)},
+        "E": {"slot": ((COLS - 0.5) * COL_PITCH, y), "header": (x_e, y), "facing": (1.0, 0.0)},
+        "W": {"slot": (-0.5 * COL_PITCH, y), "header": (x_w, y), "facing": (-1.0, 0.0)},
+        "N": {"slot": (x_ns, hi), "header": (x_ns, y_n), "facing": (0.0, 1.0)},
+        "S": {"slot": (x_ns, lo), "header": (x_ns, y_s), "facing": (0.0, -1.0)},
     }
 
 
@@ -423,17 +594,35 @@ def ports():
 
 
 def port_slots():
-    """Wall cut-outs the cables pass through, as rectangles reaching past the wall."""
+    """Wall cut-outs the cables lie in, as rectangles reaching past the wall --
+    and on W past the lip as well, which would otherwise bar the channel."""
     out, h, t = [], PORT_SLOT_W / 2, SEAM_GAP / 2 + WALL_T + 0.5
     for edge, (x, y) in ports().items():
         if edge == "E":
             out.append((x - t, y - h, x + 1, y + h))
         elif edge == "W":
-            out.append((x - 1, y - h, x + t, y + h))
+            out.append((x - 1, y - h, x + t + LIP_W, y + h))
         elif edge == "N":
             out.append((x - h, y - t, x + h, y + 1))
         else:
             out.append((x - h, y - 1, x + h, y + t))
+    return out
+
+
+def cover_notches():
+    """Rectangles cut out of the cover's edge: the cable channel from just
+    behind each header's opening out to the edge, and a relief behind each
+    latch beam so it can swing in."""
+    out, h = [], PORT_SLOT_W / 2
+    for lay in port_layout().values():
+        (hx, hy), (fx, fy), (sx, sy) = lay["header"], lay["facing"], lay["slot"]
+        back = HEADER_FACE - CHANNEL_BACK
+        xs, ys = sorted((hx + fx * back, sx + fx)), sorted((hy + fy * back, sy + fy))
+        out.append((xs[0] - h * abs(fy), ys[0] - h * abs(fx),
+                    xs[1] + h * abs(fy), ys[1] + h * abs(fx)))
+    for edge, ts in latches().items():
+        out += [seam_rect(edge, t, LATCH_W / 2 + LATCH_SLIT / 2,
+                          -WALL_T - COVER_CLEAR - LATCH_RELIEF, 0.0) for t in ts]
     return out
 
 
@@ -523,17 +712,16 @@ def check():
                 assert abs(d - p) < eps, "neighbour off the lattice: %.3f mm" % d
                 seam_pairs += ks[i][0] != ks[j][0]
 
-    # 3. Ports face their partners, and their slots fit their edges.
+    # 3. Ports face their partners, and their channels fit their edges.
     pt = ports()
+    if pt:
+        def at(t, e):
+            ox, oy = tile_origin(*t)
+            return ox + pt[e][0], oy + pt[e][1]
 
-    def at(t, e):
-        ox, oy = tile_origin(*t)
-        return ox + pt[e][0], oy + pt[e][1]
-
-    # A cable crosses straight from one tile's slot into the next one's.
-    assert math.dist(at((0, 0), "E"), at((1, 0), "W")) < eps, "E/W slots miss"
-    assert math.dist(at((0, 0), "N"), at((0, 1), "S")) < eps, "N/S slots miss"
-    if (COLS, ROWS) in PORT_SPOTS:
+        # A cable crosses straight from one tile's channel into the next one's.
+        assert math.dist(at((0, 0), "E"), at((1, 0), "W")) < eps, "E/W channels miss"
+        assert math.dist(at((0, 0), "N"), at((0, 1), "S")) < eps, "N/S channels miss"
         lay = port_layout()
 
         def opening(t, e):
@@ -544,9 +732,9 @@ def check():
             shift = (1, 0) if a == "E" else (0, 1)
             d = math.dist(opening((0, 0), a), opening(shift, b))
             assert abs(d - CABLE_GAP) < eps, "%s/%s headers %.2f mm apart" % (a, b, d)
-    wall = SEAM_GAP / 2 + WALL_T
-    assert PORT_SLOT_W < COL_PITCH - 2 * wall, "N/S slot wider than its step"
-    assert PORT_SLOT_W < (ROWS - 0.5) * p - 2 * wall, "E/W slot longer than the shared edge"
+        wall = SEAM_GAP / 2 + WALL_T
+        assert PORT_SLOT_W < COL_PITCH - 2 * wall, "N/S channel wider than its step"
+        assert PORT_SLOT_W < (ROWS - 0.5) * p - 2 * wall, "E/W channel longer than the shared edge"
 
     # 4. Tray: switches clear the walls and ribs.
     inner = case_inner()
@@ -555,42 +743,108 @@ def check():
     assert not any(overlaps(r, k) for r in ribs() for k in keepout), "rib hits a switch"
 
     # 5. Cover: posts sit under ribs, on bare PCB away from the sensors, clear
-    #    of the beam slots; the PCB drops in past the lip and bumps; the beams
-    #    bend little enough to survive repeated opening.
+    #    of every cut in the cover; the PCB drops in past the lip and bumps;
+    #    the catch beams bend little enough to survive repeated opening.
     pcb, cov = pcb_outline(), cover_outline()
     ribset = ribs()
+    notches = cover_notches()
+    cuts = notches + [r for pair in beam_cuts() for r in pair]
     for x, y in posts():
         assert any(r[0] <= x <= r[2] and r[1] <= y <= r[3] for r in ribset), "post not under a rib"
         assert min(math.dist((x, y), k[3:]) for k in keys()) >= POST_KEEPOUT + 5.0, \
             "post too close to a sensor and its capacitors"
         assert _rect_inside(_rect(x, y, 2 * POST_KEEPOUT, 2 * POST_KEEPOUT), pcb), "post off the PCB"
-        assert _rect_inside(_rect(x, y, POST_D, POST_D), cov), "post off the cover"
-        for sx, sy, L, w in beam_slots():
-            assert not overlaps(_rect(x, y, POST_D, POST_D), _rect(sx, sy, w, L)), "post in a beam slot"
+        post = _rect(x, y, POST_D, POST_D)
+        assert _rect_inside(post, cov), "post off the cover"
+        assert not any(overlaps(_grow(post, 1.0), c) for c in cuts), "post at a cut in the cover"
     x_w, x_e = side(inner, "W")[0], side(inner, "E")[0]
     assert side(pcb, "W")[0] >= x_w + LIP_W + PCB_CLEAR - eps, "PCB catches the lip"
     assert side(pcb, "E")[0] <= x_e - CATCH_D - PCB_CLEAR + eps, "PCB catches the bumps"
     _, lo, hi = side(cov, "E")
-    for (y, L), (n0, n1) in zip(catch_beams(), pry_notches()):
-        assert lo + 3 <= y - L / 2 and y + L / 2 <= hi - 3, "beam runs off the edge"
-        assert n1 <= y + L / 2, "pry notch beyond the flexing part of the beam"
-        # fixed-fixed beam pushed aside at mid-span: peak strain = 12 * d * w / L^2.
-        # PLA is the brittle case: keep a flex that repeats under ~1.5 %.
-        strain = 12 * (CATCH_D - COVER_CLEAR) * BEAM_W / L ** 2
-        assert strain < 0.015, "beam strain %.1f%% -- too high for PLA" % (100 * strain)
+    for (root, tip), strain, (_, end) in zip(catch_beams(), catch_strain(), beam_cuts()):
+        # The corner of cover behind a beam's root carries its bending moment.
+        assert min(root - lo, hi - root) >= BEAM_W, "catch beam rooted too near the cover's corner"
+        # The cut across the tip either lies inside the edge or opens into a channel.
+        in_channel = any(c[0] <= end[0] and c[1] <= end[1] + eps and end[3] <= c[3] + eps
+                         for c in notches)
+        assert in_channel or (lo + 3 <= end[1] and end[3] <= hi - 3), "catch beam's tip runs off the edge"
+        # PLA is the brittle case: keep a flex that repeats near 1 %.
+        assert strain < 0.012, "catch beam strain %.1f%% -- too high for PLA" % (100 * strain)
     assert all(inside(x, y, pcb) for x, y in peg_holes()), "switch peg off the PCB"
 
-    # 6. Fits the printer, and the caps fit the lattice.
+    # 6. Joints.  Along each wall, everything keeps its distance from the wall's
+    #    ends and from everything else; nothing that cuts a wall meets a rib.
+    assert RAIL_REACH < SEAM_GAP + WALL_T, "rail reaches past the neighbour's wall, into its lip"
+    grip = RAIL_REACH - SEAM_GAP - RAIL_CLEAR * math.sqrt(2)
+    assert grip > 0.5, "dovetail too shallow to hold tiles together"
+    assert rail_slot_top() < -Z_PLATE, "rail slot cuts into the plate"
+    hook = latch_hook()
+    assert hook[0][1] > -Z_FLOOR + LATCH_LIFT + 1.0, "latch hook too near the beam's end"
+    assert hook[-1][1] < -Z_PCB_BOT, "latch hook as high as the PCB"
+    strain, force, at_pcb = latch_flex()
+    # The beams stand upright in the print and bend across its layers.
+    assert strain < 0.008, "latch strain %.1f%% -- too high across layers" % (100 * strain)
+    assert at_pcb + 0.1 < PCB_CLEAR + latch_taper(-Z_PCB_BOT), "latch beam reaches the PCB's edge"
+    slit = LATCH_W / 2 + LATCH_SLIT
+    r_rail, r_latch = rails(), latches()
+
+    def on_wall(edge):
+        """[(what, lo, hi, the flat it has to fit)] of everything on one wall,
+        along the wall.  E and N carry rails (on their outer face) and latch
+        beams; W and S the rails' slots, at their flared mouths, and the
+        latches' windows."""
+        if edge in "EN":
+            sizes = (edge, rail_half(RAIL_REACH), case_outer(), slit)
+        else:
+            sizes = (OPPOSITE[edge], slot_half(SEAM_GAP) + RAIL_FLARE, inner, LATCH_W / 2 + 0.5)
+        male, h_rail, rail_on, h_latch = sizes
+        out = [("rail", t - h_rail, t + h_rail, flat(rail_on, edge, t)) for t in r_rail[male]]
+        out += [("latch", t - h_latch, t + h_latch, flat(inner, edge, t)) for t in r_latch[male]]
+        if edge in pt:
+            c = pt[edge][edge in "EW"]
+            out.append(("port", c - PORT_SLOT_W / 2, c + PORT_SLOT_W / 2, None))
+        if edge == "E":
+            out += [("bump", y0, y1, None) for y0, y1 in catch_bumps()]
+            out += [("pry", y0, y1, None) for y0, y1 in pry_notches()]
+        return out
+
+    for edge in "ENWS":
+        things = on_wall(edge)
+        for what, a, b, fits in things:
+            assert fits is None or (fits[1] + 1.5 <= a and b <= fits[2] - 1.5), \
+                "%s at %.1f too near the %s wall's end" % (what, (a + b) / 2, edge)
+        for i, (wa, a0, a1, _) in enumerate(things):
+            for wb, b0, b1, _ in things[i + 1:]:
+                if {wa, wb} == {"pry", "port"}:
+                    continue                # a pry notch may open into the port's channel
+                gap = 0.4 if {wa, wb} == {"pry", "bump"} else 1.0
+                assert a1 + gap <= b0 or b1 + gap <= a0, \
+                    "%s and %s too close on the %s wall" % (wa, wb, edge)
+    for edge in "EN":
+        other = OPPOSITE[edge]
+        through = [seam_rect(edge, t, slit, -WALL_T - 0.5, 0.0) for t in r_latch[edge]]
+        through += [seam_rect(other, t, slot_half(SEAM_GAP + WALL_T), SEAM_GAP, SEAM_GAP + WALL_T + 0.5)
+                    for t in r_rail[edge]]
+        assert not any(overlaps(_grow(c, 0.5), r) for c in through for r in ribset), \
+            "a rib ends at a latch or a rail slot"
+    relief = LATCH_W / 2 + LATCH_SLIT / 2
+    for t in r_latch["E"]:
+        assert all(t + relief + 1.0 <= min(b) or max(b) + 1.0 <= t - relief for b in catch_beams()), \
+            "latch relief cuts into a catch beam"
+
+    # 7. Fits the printer, and the caps fit the lattice.
     bx0, by0, bx1, by1 = bbox(case_outer())
+    bx1, by1 = bx1 + RAIL_REACH, by1 + RAIL_REACH
     assert bx1 - bx0 <= PRINT_BED and by1 - by0 <= PRINT_BED, "case exceeds the bed"
     assert ROW_PITCH > CAP_AF, "caps collide"
 
     beams = catch_beams()
+    n_rails = sum(len(v) for v in r_rail.values())
     return [
         "tile          %d x %d = %d keys, %d muxes (8:1)"
         % (COLS, ROWS, KEYS_PER_TILE, math.ceil(KEYS_PER_TILE / 8)),
         "pitch         %.2f mm all six ways (columns %.3f apart)" % (p, COL_PITCH),
-        "case          %.2f x %.2f x %.2f mm (bed %.0f)"
+        "case          %.2f x %.2f x %.2f mm with its rails (bed %.0f)"
         % (bx1 - bx0, by1 - by0, Z_FLOOR, PRINT_BED),
         "cap gap       %.2f mm; caps overhang the tile edge by %.2f mm"
         % (p - CAP_AF, CAP_AF / math.sqrt(3) - COL_PITCH / 2),
@@ -598,11 +852,15 @@ def check():
         % (samples, KEYS_PER_TILE),
         "lattice       OK (2x2 tiles, %d neighbour pairs across seams, all %.2f mm)"
         % (seam_pairs, p),
-        "ports         OK (E/W slots at y=%.1f, N/S slots on column %d)"
-        % (pt["E"][1], round(pt["N"][0] / COL_PITCH) + 1),
+        "ports         OK (E/W channels at y=%.1f, N/S channels on column %d)"
+        % (pt["E"][1], round(pt["N"][0] / COL_PITCH) + 1) if pt else
+        "ports         none at this size",
         "cover         OK (%d posts under ribs; %d catch beam%s, %.1f mm bite, %.1f%% strain)"
         % (len(posts()), len(beams), "s" * (len(beams) > 1), CATCH_D - COVER_CLEAR,
-           100 * max(12 * (CATCH_D - COVER_CLEAR) * BEAM_W / L ** 2 for _, L in beams)),
+           100 * max(catch_strain())),
+        "joints        OK (%d rails, %.2f mm dovetail grip; %d latches, %.1f mm bite, "
+        "%.1f%% strain, ~%.1f N on a hook in PLA)"
+        % (n_rails, grip, sum(len(v) for v in r_latch.values()), LATCH_BITE, 100 * strain, force),
     ]
 
 

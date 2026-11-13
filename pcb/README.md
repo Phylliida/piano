@@ -93,9 +93,11 @@ low priority. Their paths are NixOS store paths, so edit them on another machine
   `place_ports.py` moves the parts to match.
   - **Cables:** E and W share a height; N and S share column 5. Partner
     headers' openings are 50 mm apart across the seam, so a 50 mm GH 6-pin
-    cable runs straight from one to the other, through both tiles' slots, in
-    the 5 mm under the boards. It passes under one key on the way, between
-    or beside its switch pegs.
+    cable runs straight from one to the other, in the 5 mm under the boards.
+    The case leaves that whole run open from below: the cover is cut away
+    from each header to its edge and both walls are open down to the floor.
+    The cable passes under one key on the way, between or beside its switch
+    pegs.
   - **Cable length:** "50 mm" should mean 50 mm between the two plugs'
     fronts. Some listings measure the wire alone (a little slack, fine) or
     the whole cable end to end (about 5 mm short). Check the listing's
@@ -103,8 +105,9 @@ low priority. Their paths are NixOS store paths, so edit them on another machine
   - **Pinout:** `VIN, GND, A, B, GND, VIN`. It's symmetric, so a reversed
     cable cannot short power, and a ground wire separates each data wire
     from VIN. The MCU's `TRPSWAP` bit fixes swapped data pins in firmware.
-  - **Plugging in:** pop both tiles' covers and plug in the cable. Straight
-    or reversed both work.
+  - **Plugging in:** snap the tiles together, turn the keyboard over and
+    plug the cable in from underneath. The covers stay on. Straight or
+    reversed both work.
 
 ## How it is routed
 
