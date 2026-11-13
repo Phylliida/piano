@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Draw tile_circuit.py as a KiCad 9 schematic: pcb/tile.kicad_sch.
+"""Draw a circuit module as a KiCad 9 schematic.
+
+    ./kpython.sh gen_sch.py         tile_circuit.py -> pcb/tile.kicad_sch
+    ./kpython.sh gen_hub_sch.py     hub_circuit.py  -> hub/hub.kicad_sch
 
 Every connection is a short wire stub off the pin, ending in a power symbol
 (GND, +3V3, ...) or a global label named after the net -- the same style as
@@ -7,10 +10,9 @@ HE60's schematic.  Unused pins get a no-connect flag, so KiCad's ERC can tell
 "deliberately unused" from "forgotten".
 
 Then it checks itself with KiCad: it runs ERC, exports KiCad's own netlist of
-the file it just wrote, and requires that netlist to equal tile_circuit.nets()
-exactly.  The symbol positions are cosmetic; that comparison is the proof.
-
-    ./kpython.sh gen_sch.py
+the file it just wrote, and requires that netlist to equal the circuit's
+nets() exactly.  The symbol positions are cosmetic; that comparison is the
+proof.
 """
 
 import copy
@@ -28,31 +30,42 @@ from kisexp import S, Sym
 import tile_circuit as tc
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT = os.path.join(HERE, "pcb")
-SCH = os.path.join(OUT, "tile.kicad_sch")
-PROJECT = "tile"
 SYMBOL_DIR = os.environ.get(
     "KICAD9_SYMBOL_DIR",
     "/nix/store/6ayphbhvpaql7s42qnwxpzl731scj0b1-kicad-symbols-e92aabf81d/share/kicad/symbols")
-LIB_PATHS = {"tile": os.path.join(OUT, "tile.kicad_sym")}
 
 GRID = 1.27
 STUB = 2.54
 POWER_NETS = {"GND": "power:GND", "+3V3": "power:+3V3", "+3.3VA": "power:+3.3VA"}
 # Which way each power symbol's graphic points with rotation 0 (visual degrees).
 POWER_UP = {"power:GND": 270}
+# Fields that go somewhere other than where the library has them: a
+# resistor's value sits inside its body there, and a long one runs out over
+# the wires.
+FIELD_AT = {("Device:R", "Value"): (-2.032, 0, 90)}
 
 
 def new_uuid():
     return str(uuid.uuid4())
 
 
-# A rerun keeps the sheet's and each part's UUID: the board links footprints to
-# symbols by them, so a routed board still matches after the circuit changes.
-try:
-    PRIOR = json.load(open(os.path.join(OUT, "symbol_uuids.json")))
-except FileNotFoundError:
-    PRIOR = {"root": None, "symbols": {}}
+def configure(circuit, out_dir, project):
+    """Which circuit to draw and where: <out_dir>/<project>.kicad_sch, with the
+    project's own symbols in <out_dir>/<project>.kicad_sym."""
+    global tc, OUT, SCH, PROJECT, LIB_PATHS, PRIOR
+    tc, OUT, PROJECT = circuit, out_dir, project
+    SCH = os.path.join(OUT, project + ".kicad_sch")
+    LIB_PATHS = {project: os.path.join(OUT, project + ".kicad_sym")}
+    # A rerun keeps the sheet's and each part's UUID: the board links
+    # footprints to symbols by them, so a routed board still matches after the
+    # circuit changes.
+    try:
+        PRIOR = json.load(open(os.path.join(OUT, "symbol_uuids.json")))
+    except FileNotFoundError:
+        PRIOR = {"root": None, "symbols": {}}
+
+
+configure(tc, os.path.join(HERE, "pcb"), "tile")
 
 
 def snap(v):
@@ -151,13 +164,11 @@ class Sheet:
         self.used.add(lib_id)
         u = PRIOR["symbols"].get(ref) or new_uuid()
         pins = self.libs.pins(lib_id, unit)
-        ys = [-p[1] for p in pins.values()] or [0]
-        top, bot = at[1] + min(ys) - 3.81, at[1] + max(ys) + 3.81
         node = S("symbol", S("lib_id", lib_id), S("at", at[0], at[1], rot), S("unit", unit),
                  S("exclude_from_sim", Sym("no")), S("in_bom", Sym("yes" if in_bom else "no")),
                  S("on_board", Sym("yes")), S("dnp", Sym("yes" if dnp else "no")), S("uuid", u),
-                 _prop("Reference", ref, at[0], snap(top), hide=hide_ref),
-                 _prop("Value", value, at[0], snap(bot), hide=hide_value),
+                 self._field(lib_id, "Reference", ref, at, rot, hide_ref),
+                 self._field(lib_id, "Value", value, at, rot, hide_value),
                  _prop("Footprint", footprint, at[0], at[1], hide=True),
                  _prop("Datasheet", "", at[0], at[1], hide=True),
                  _prop("Description", "", at[0], at[1], hide=True))
@@ -170,8 +181,32 @@ class Sheet:
         self.items.append(node)
         return u
 
+    def _field(self, lib_id, key, text, at, rot, hide):
+        """The Reference or Value text, where it doesn't sit on a wire."""
+        if lib_id.startswith("power:"):
+            # Beyond the graphic, on the side away from the pin.  KiCad draws
+            # a field of a symbol turned 90 degrees a quarter turn further.
+            out = (rot + POWER_UP.get(lib_id, 90)) % 360
+            dx, dy = round(math.cos(math.radians(out))), -round(math.sin(math.radians(out)))
+            d = 3.81 if dx == 0 else 3.0 + 0.55 * len(text)
+            return _prop(key, text, round(at[0] + dx * d, 4), round(at[1] + dy * d, 4), hide=hide,
+                         angle=90 if dx else 0)
+        if rot == 0:
+            # Where the library's author put it.
+            lib = next(p for p in k.children(self.libs.embedded(lib_id), "property") if p[1] == key)
+            pat = k.find(lib, "at")
+            just = k.find(k.find(lib, "effects"), "justify")
+            if (lib_id, key) in FIELD_AT:
+                pat, just = ("at",) + FIELD_AT[lib_id, key], None
+            return _prop(key, text, round(at[0] + pat[1], 4), round(at[1] - pat[2], 4), hide=hide,
+                         angle=pat[3] if len(pat) > 3 else 0,
+                         justify=" ".join(str(j) for j in just[1:]) if just else None)
+        ys = [-p[1] for p in self.libs.pins(lib_id).values()] or [0]
+        y = at[1] + min(ys) - 3.81 if key == "Reference" else at[1] + max(ys) + 3.81
+        return _prop(key, text, at[0], snap(y), hide=hide)
+
     def place(self, part, at, rot=0):
-        """Place a tile_circuit Part and draw every one of its connections."""
+        """Place a circuit Part and draw every one of its connections."""
         at = (snap(at[0]), snap(at[1]))
         pins = self.libs.pins(part.symbol, part.unit)
         for num, want in part.names.items():
@@ -185,22 +220,53 @@ class Sheet:
             extra.append(("MPN", part.mpn))
         self.symbol_uuid[part.ref] = self._instance(
             part.symbol, part.ref, part.value, at, rot, part.unit, part.footprint, part.dnp, extra)
+        ends = {num: self.pin_xy(part.symbol, part.unit, at, rot, num) for num in pins}
+        drawn = {}                  # pin end -> net: stacked pins are drawn once
+        reach = {}                  # power pin -> how far past the pin its symbol ends
         for num in pins:
-            end, out = self.pin_xy(part.symbol, part.unit, at, rot, num)
+            end, out = ends[num]
             net = part.pins.get(num)
+            if end in drawn:
+                assert drawn[end] == net, "%s pin %s is stacked on a pin of %s, but is on %s" % (
+                    part.ref, num, drawn[end], net)
+                continue
+            drawn[end] = net
             if net is None:
                 self.items.append(S("no_connect", S("at", *end), S("uuid", new_uuid())))
-            else:
-                self.attach(net, end, out)
+                continue
+            stub = STUB
+            if net in POWER_NETS and out in (90, 270):
+                # A power symbol is wider than the pitch of an IC's pins: one
+                # between connected neighbours goes out beyond what they carry.
+                near = []
+                for n, (end2, out2) in ends.items():
+                    net2 = part.pins.get(n)
+                    if (n == num or net2 is None or out2 != out or end2[1] != end[1]
+                            or abs(end2[0] - end[0]) > 2.6):
+                        continue
+                    if net2 not in POWER_NETS:
+                        near.append(STUB + 2.5 + 1.1 * len(net2))       # a label, about so long
+                    elif n in reach:
+                        near.append(reach[n])
+                if near:
+                    stub = math.ceil((max(near) + 1.0) / GRID) * GRID
+                reach[num] = stub + 5.5
+            self.attach(net, end, out, stub)
 
-    def attach(self, net, end, out):
+    def attach(self, net, end, out, stub=STUB):
         dx, dy = round(math.cos(math.radians(out))), -round(math.sin(math.radians(out)))
-        tip = (snap(end[0] + dx * STUB), snap(end[1] + dy * STUB))
+        tip = (snap(end[0] + dx * stub), snap(end[1] + dy * stub))
         self.wire(end, tip)
         if net in POWER_NETS:
             self.power(POWER_NETS[net], tip, out)
         else:
             self.label(net, tip, out)
+
+    def pwr_flag(self, net, at):
+        """Tell ERC that `net` is powered, though no power output pin drives it."""
+        at = (snap(at[0]), snap(at[1]))
+        self.power("power:PWR_FLAG", at, 90)
+        self.attach(net, at, 270)
 
     def wire(self, a, b):
         self.items.append(S("wire", S("pts", S("xy", *a), S("xy", *b)),
@@ -232,7 +298,8 @@ class Sheet:
         tree = S("kicad_sch", S("version", 20250114), S("generator", "eeschema"),
                  S("generator_version", "9.0"), S("uuid", self.root), S("paper", self.paper),
                  S("title_block", S("title", tc.TITLE), S("rev", "0.1"),
-                   S("comment", 1, "Generated by gen_sch.py from tile_circuit.py -- edit those, not this file")),
+                   S("comment", 1, "Generated by %s from %s.py -- edit those, not this file"
+                     % (os.path.basename(sys.argv[0]), tc.__name__))),
                  S("lib_symbols", *libsyms), *self.items,
                  S("sheet_instances", S("path", "/", S("page", "1"))), S("embedded_fonts", Sym("no")))
         with open(path, "w") as fh:
@@ -291,14 +358,7 @@ def layout(sheet):
                (20.32, 20.32))
     grid(by_block["power"], 33.02, 55.88, 8, 33.02, 50.8)
     for i, net in enumerate(tc.PWR_FLAG_NETS):
-        at = (snap(33.02 + i * 33.02), snap(180.34))
-        sheet.power("power:PWR_FLAG", at, 90)
-        sheet.wire(at, (at[0], snap(at[1] + STUB)))
-        tip = (at[0], snap(at[1] + STUB))
-        if net in POWER_NETS:
-            sheet.power(POWER_NETS[net], tip, 270)
-        else:
-            sheet.label(net, tip, 270)
+        sheet.pwr_flag(net, (33.02 + i * 33.02, 180.34))
 
 
 # ------------------------------------------------------------------- checks ---
@@ -342,14 +402,14 @@ def check(path):
     return not bad and not errors, unconnected
 
 
-def main():
+def run(layout, paper="A1"):
     os.makedirs(OUT, exist_ok=True)
-    sheet = Sheet(Libs())
+    sheet = Sheet(Libs(), paper)
     layout(sheet)
     sheet.write(SCH)
     print("wrote %s: %d parts" % (os.path.relpath(SCH, HERE), len(sheet.symbol_uuid)))
     ok, unconnected = check(SCH)
-    # gen_pcb.py links footprints to symbols by these, and gives unused pads
+    # The board generator links footprints to symbols by these, and gives unused pads
     # the same placeholder nets, so DRC's schematic-parity check agrees.
     with open(os.path.join(OUT, "symbol_uuids.json"), "w") as fh:
         json.dump({"root": sheet.root, "symbols": sheet.symbol_uuid, "unconnected": unconnected},
@@ -358,4 +418,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    run(layout)

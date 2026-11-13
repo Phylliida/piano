@@ -9,6 +9,8 @@ pcb/fp-info-cache
 # DRC and ERC reports: the generators rewrite them on every run
 pcb/*.drc.json
 pcb/*.erc.json
+hub/*.drc.json
+hub/*.erc.json
 
 # Other people's repositories, cloned for reference (refs/README.md lists them)
 refs/*
@@ -25,3 +27,8 @@ work/
 # Vendor datasheets
 *.pdf
 *.PDF
+
+# Firmware: build output, and the two outside libraries that
+# firmware/tools/fetch_deps.sh downloads
+firmware/build/
+firmware/deps/
