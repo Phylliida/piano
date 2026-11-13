@@ -1,9 +1,14 @@
 # Tile PCB (8 x 5 keys)
 
-Generated, not hand-drawn. Edit the Python, then regenerate. Don't edit
-`tile.kicad_sch` by hand: the next run overwrites it. Tracks you draw in
-`tile.kicad_pcb` are also lost if you rerun `gen_pcb.py`, so save copies
-while routing.
+Made by scripts, not drawn by hand, and fully routed: KiCad's DRC reports
+0 errors and 0 unrouted connections.
+
+- **Schematic:** regenerated from `tile_circuit.py` on every run. Don't edit
+  `tile.kicad_sch` by hand: the next run overwrites it.
+- **Board:** no longer regenerated. `gen_pcb.py` placed the parts once and
+  now refuses to run, because it would throw the routing away. Change the
+  board in KiCad, or with a script that edits it in place, as
+  `place_ports.py`, `remove_leds.py` and `route_board.py` do.
 
 | file | made by | what |
 |---|---|---|
@@ -11,11 +16,27 @@ while routing.
 | `../tilegeom.py` | you | every position the board and the printed case share |
 | `tile.kicad_sym`, `tile.pretty/` | `gen_lib.py` | the MCU and sensor symbols and the switch footprint (plus LED ones, unused since the LEDs were removed) |
 | `tile.kicad_sch` | `gen_sch.py` | the schematic |
-| `tile.kicad_pcb`, `tile.kicad_pro` | `gen_pcb.py` | every part placed, all nets assigned, ground planes, track widths per net |
+| `tile.kicad_pcb`, `tile.kicad_pro` | `gen_pcb.py`, then by hand, then `route_board.py` | every part placed, ground planes, track widths per net (`gen_pcb.py`); each key's two stubs and the power block (by hand); every other track and via (`route_board.py`) |
+| `../route_board.py`, `../pcbroute.py` | you | the routing as a script, and the small router it uses |
+
+After changing `tile_circuit.py`:
 
 ```
-../kpython.sh ../gen_lib.py && ../kpython.sh ../gen_sch.py && ../kpython.sh ../gen_pcb.py
+../kpython.sh ../gen_lib.py && ../kpython.sh ../gen_sch.py
 ```
+
+To route again, after a change to `route_board.py` or to a pin in the
+circuit, start from the board as it was routed by hand. The script refuses
+a board it has already routed:
+
+```
+git show 991aaaf:pcb/tile.kicad_pcb > tile.kicad_pcb
+../kpython.sh ../route_board.py
+```
+
+Its `nets` stage gives the pads the nets `tile_circuit.py` names. The later
+stages name pins and coordinates, so a moved signal means adapting the stage
+that routes it, and a new part has to be placed first.
 
 `kpython.sh` and `kcli.sh` run KiCad's Python and `kicad-cli` on one core, at
 low priority. Their paths are NixOS store paths, so edit them on another machine.
@@ -29,10 +50,11 @@ low priority. Their paths are NixOS store paths, so edit them on another machine
 - **Pins:** every IC connection names the pin it expects (`("U2", "3", "IN")`),
   and generation stops if the symbol disagrees. This caught the TVS diode's
   pin names on the first run.
-- **Board:** DRC with schematic parity. Any error other than an unrouted
-  connection stops the run. Expected result on a fresh board: 261 unrouted
-  connections, about 60 silkscreen warnings, and one "isolated copper" warning. That last one is
-  the front ground fill, which touches no pads until you add vias.
+- **Board:** `route_board.py` checks every track and via against the
+  net classes' clearances as it adds them, then runs DRC with schematic
+  parity in a fresh process. Result: 0 errors, 0 parity issues, 0 unrouted
+  connections. The 72 silkscreen warnings (reference texts in tight spots)
+  were there before routing.
 - **Audit:** an independent review on 2026-10-11 checked every IC's
   pin-to-pad mapping against its datasheet (all correct), plus the circuit,
   part heights and the fit with the case. Its findings are fixed below,
@@ -42,10 +64,11 @@ low priority. Their paths are NixOS store paths, so edit them on another machine
 
 - **2 layers** (cheaper). This works because every part sits on the back, so
   the front is almost entirely free. HE60 routes 67 keys on 2 layers.
-  - **B.Cu (bottom):** every part, the short connections, and a ground fill
-    around them.
-  - **F.Cu (top, switch side):** no parts. Long runs (power rails, mux
-    buses) plus a ground fill.
+  - **B.Cu (bottom):** every part, each sensor's track to its mux, the
+    sensors' supply, and a ground fill around them.
+  - **F.Cu (top, switch side):** no parts. It is the ground plane, cut only
+    by what has to cross the back's tracks: the mux lines up the middle, VIN,
+    `+3V3` to the MCU, the port data lines and eight short supply hops.
   - To switch back to 4 layers (solid inner ground and power planes, easier
     routing, higher cost), set `LAYERS = 4` in `gen_pcb.py`.
 - **Under each key:** the sensor is centred under the switch stem. Its 100n
@@ -83,37 +106,60 @@ low priority. Their paths are NixOS store paths, so edit them on another machine
   - **Plugging in:** pop both tiles' covers and plug in the cable. Straight
     or reversed both work.
 
-## Routing it: a first-timer's order
+## How it is routed
 
-In KiCad, open `tile.kicad_pro`, then the PCB editor. The thin lines are the
-*ratsnest*: connections still to draw. Press **X** to route a track, **V**
-while routing to drop a via to another layer, **B** to refill zones, and run
-**Inspect > Design Rules Checker** often. Track width follows the net class
-(VIN 1.0 mm, power 0.5 mm, signals 0.2 mm), so you rarely set it by hand.
+`route_board.py` works in stages, each a short function that names its
+tracks' coordinates or searches for them:
 
-1. **Power, before the fills fill up.**
-   - Keep the buck converter's loop short and fat on B.Cu. That's U2, its
-     input cap (already straddling U2's VIN and GND pins), L1, and the 22u
-     output caps. It's the noisiest part of the board.
-   - Keep the feedback divider's trace to U2 pin 1 short, and away from L1.
-   - Route VIN between the four ports and the buck at 1 mm.
-   - Run `+3.3VA` (sensors) as a wide trunk on F.Cu, along the channels
-     between key columns, with short drops to each part.
-2. **Ground.**
-   - Press B to refill.
-   - Wherever a ground pad's ratsnest line remains, add a via to the other
-     side's fill.
-   - Then sprinkle *stitching vias* (vias on GND, not connected to any trace)
-     every 10–15 mm, so the two fills act as one ground. Without an inner
-     plane, this is what keeps the analog readings quiet.
-3. **MCU basics.**
-   - Crystal Y1 and its two 30p capacitors: as short as possible, nothing
-     else running under them.
-   - Then each decoupling capacitor to its pin.
-4. **Analog.** Each sensor output goes to its mux, the five mux outputs go
-   to the MCU, and the three select lines are shared by all five muxes. Keep
-   these away from the buck.
-5. **Ports.** UART through the 220R resistors.
+| stage | what it adds |
+|---|---|
+| `lanes`, `lanes3` | Each sensor's output to its mux, on the back. A mux lies in the band between two key rows; the lanes run along the band, side by side, into its pins. The channel order was chosen so that none cross. Row 3's mux stands across its band, beside the MCU, and its lanes come round it. |
+| `bus` | The three select lines and the five mux outputs, up the middle of the board on the front. |
+| `supply` | `+3.3VA` as a ladder on the back, 0.5 mm wide: a spine down the west and east edges, four rungs between the key rows, a short drop to each sensor and mux. The outermost keys at the north and south edges, which no rung reaches, get theirs over the front. |
+| `vin` | VIN between the four ports and to the TVS, 1 mm wide: west to east on the front, a stem down the middle to the S port. Two vias wherever it changes layer, because the current of every tile further on passes through. |
+| `uarts` | Two data lines per port, through the 220R resistors. |
+| `mcu` | `+3V3`, the crystal, reset, BOOT0, the debug pads, the pull-downs. |
+| `gnd` | A via to the front plane at every ground pad: 172 of them. Larger ones (0.8 mm) at the ports, the TVS and the regulators' capacitors. |
+| `ties` | 182 more vias between the two ground fills. The tracks cut the back's fill into pieces; each piece gets a via wherever it is more than 8 mm from its next one, if one fits. |
+
+The power block keeps its hand routing, and the ports stand where
+`place_ports.py` put them.
+
+One weak spot, accepted: the ground pins of AM4 (row 3's mux) and of two
+small parts beside it reach the plane over a 5 mm long, 0.25 mm wide track
+to the via of one of the MCU's ground pins, because tracks wall the front in there. A 4051
+draws microamps.
+
+## Pin map, for the firmware
+
+`tile_circuit.py` is the truth (`SELECT_PINS`, `ADC_PINS`, `ADC_CHANNEL`,
+`CHANNEL_OF_COL`, `UARTS`); this is a copy.
+
+- **Keys:** column 0 is the west one, row 0 the south one. Key
+  `HE(5 * column + row + 1)`.
+- **Selects**, shared by the five muxes: S0 = PB0, S1 = PC5, S2 = PC4.
+  S0 is the lowest bit.
+- **Mux outputs:** one select value reads one key of every row.
+
+  | row | mux | MCU pin | ADC1 channel |
+  |---|---|---|---|
+  | 0 | AM1 | PA4 | 4 |
+  | 1 | AM2 | PA5 | 5 |
+  | 2 | AM3 | PA6 | 6 |
+  | 3 | AM4 | PB1 | 9 |
+  | 4 | AM5 | PA7 | 7 |
+
+- **Select value for each column:**
+
+  | column | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+  |---|---|---|---|---|---|---|---|---|
+  | rows 0, 1, 2, 4 | 6 | 7 | 4 | 5 | 2 | 3 | 1 | 0 |
+  | row 3 | 0 | 1 | 3 | 2 | 5 | 4 | 7 | 6 |
+
+- **Ports** (TX, RX): W = USART2 (PA2, PA3), N = USART6 (PC6, PC7),
+  E = UART8 (PC8, PC9), S = USART3 (PC10, PC11). The pins' IOMUX numbers
+  are in the reference manual, chapter 6.
+- **Debug pads J1**, pad 1 to 6: +3V3, BOOT0, SWCLK, NRST, SWDIO, GND.
 
 ## Before ordering: not yet verified
 
@@ -147,12 +193,13 @@ while routing to drop a via to another layer, **B** to refill zones, and run
   - PA11 and PA12 have 100k pull-downs, per erratum ES0011 1.5.2.
   - Enable pull-ups on the UART receive pins, since they float with no cable
     plugged in. Put unused GPIOs in analog mode.
-  - The factory bootloader listens on USART1 (the E port), USART3 (the N
-    port), SPI1 (PA4–PA7, which are the mux outputs) and I2C1. Unplug the
-    neighbouring tiles when flashing through a port.
+  - The factory bootloader listens on USART2 (the W port), USART3 (the S
+    port), USART1 (PA9/PA10, not connected here) and USB (PA11/PA12, pulled
+    down here): datasheet table 5. Unplug the neighbouring tiles when
+    flashing through a port.
 - **Flashing without a probe** (plan, untested): bridge J1 pad 1 (3V3) to
-  pad 6 (BOOT0) while the tile powers up, and the factory bootloader waits on
-  the E port; the hub sends the firmware down that cable. Only the first
-  flash needs the bridge: after that, firmware can enter the bootloader on
-  the hub's command. Not yet checked: whether a blank chip starts the
-  bootloader by itself.
+  pad 2 (BOOT0), its neighbour, while the tile powers up, and the factory
+  bootloader waits on the W and S ports; the hub sends the firmware down a
+  cable plugged into one of those. Only the first flash needs the bridge:
+  after that, firmware can enter the bootloader on the hub's command. Not
+  yet checked: whether a blank chip starts the bootloader by itself.
