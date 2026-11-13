@@ -7,7 +7,7 @@ generator refuses to run if the symbol disagrees -- a wrong pin number fails
 loudly instead of shipping.
 
 Sources for the choices below (verified against datasheets, 2026-10-11):
-  AT32F405 pins / UART muxing   Artery DS_AT32F405_402 V2.03 Table 9, RM V2.02 Tables 6-1..6-5
+  AT32F405 pins / UART muxing   Artery DS_AT32F405_402 V2.02 Tables 5 and 9, RM V2.02 Tables 6-1..6-5
   AP63201 buck                  Diodes DS41326 Rev 3-2, Figures 1/20/21, Tables 1 and 3
   MT9102ET supply current       MagnTek MT910X datasheet sec. 10: 6.0 mA typ at 3.3 V
   everything else               copied from HE60 (refs/HE60), a fabricated, working board
@@ -97,10 +97,16 @@ for i, c, r, x, y in KEYS:
     cap("4.7n/50V", "HE%d" % n, "GND", "keys")       # sensor output, as HE60
 
 # -------------------------------------------------------------------- muxes ---
-# Mux m reads key row m: channel c is the key in column c.  The three select
-# lines are shared by every mux, so one select value reads 5 keys at once.
+# Mux m reads key row m.  The three select lines are shared by every mux, so
+# one select value reads 5 keys at once.  Which channel reads which column is
+# chosen for the copper: every key's track then runs into its mux pin without
+# crossing another (route_board.py).  AM4 is turned a quarter turn, because U1
+# and the W and E ports crowd its band, so it has an order of its own.  The
+# firmware reads key (column c, row m) at select value CHANNEL_OF_COL[m][c].
 CHANNEL_PINS = ["13", "14", "15", "12", "1", "5", "2", "4"]   # 4051 A0..A7
-assert g.COLS <= 8
+CHANNEL_OF_COL = {m: [6, 7, 4, 5, 2, 3, 1, 0] for m in range(g.ROWS)}
+CHANNEL_OF_COL[3] = [0, 1, 3, 2, 5, 4, 7, 6]
+assert g.COLS <= 8 and all(sorted(v) == list(range(8)) for v in CHANNEL_OF_COL.values())
 for m in range(g.ROWS):
     am = part("AM", "74xx:74HC4051", "SN74LV4051A", "Package_SO:TSSOP-16_4.4x5mm_P0.65mm", "muxes",
               mpn="SN74LV4051APWR")
@@ -112,7 +118,8 @@ for m in range(g.ROWS):
     connect("MUX_OUT%d" % (m + 1), (am.ref, 3, "A"))
     for c in range(g.COLS):
         key = next(k for k in KEYS if k[1] == c and k[2] == m)
-        connect("HE%d" % (key[0] + 1), (am.ref, CHANNEL_PINS[c], "A%d" % c))
+        ch = CHANNEL_OF_COL[m][c]
+        connect("HE%d" % (key[0] + 1), (am.ref, CHANNEL_PINS[ch], "A%d" % ch))
     cap("100n/16V", "+3.3VA", "GND", "muxes")
 
 # ---------------------------------------------------------------------- mcu ---
@@ -129,17 +136,25 @@ connect("HEXT_IN", (U1.ref, 5, "PF0/HEXT_IN"))
 connect("HEXT_OUT", (U1.ref, 6, "PF1/HEXT_OUT"))
 connect("NRST", (U1.ref, 7, "NRST"))
 connect("OTGHS_R", (U1.ref, 33, "OTGHS1_R"))     # DS Table 9 note 5: 12k 1% to GND
-connect("MUX_S0", (U1.ref, 9, "PC1"))
-connect("MUX_S1", (U1.ref, 10, "PC2"))
-connect("MUX_S2", (U1.ref, 11, "PC3"))
-ADC_PINS = [("20", "PA4"), ("21", "PA5"), ("22", "PA6"), ("23", "PA7"), ("24", "PC4")]
+# Signal pins are picked for the copper (route_board.py), among the pins that
+# can do the job (DS Table 9).  The three selects and MUX_OUT4 leave U1's top
+# side side by side, straight into AM4 next to it; the other four mux outputs
+# come up the middle of the board on the front and drop onto PA4-PA7 under U1.
+SELECT_PINS = [("26", "PB0"), ("25", "PC5"), ("24", "PC4")]         # MUX_S0, S1, S2
+for i, pin in enumerate(SELECT_PINS):
+    connect("MUX_S%d" % i, (U1.ref,) + pin)
+# MUX_OUT1..5 -> ADC1_IN4, IN5, IN6, IN9, IN7 (IN0-7 = PA0-7, IN8/9 = PB0/1, IN10-15 = PC0-5)
+ADC_PINS = [("20", "PA4"), ("21", "PA5"), ("22", "PA6"), ("27", "PB1"), ("23", "PA7")]
+ADC_CHANNEL = [4, 5, 6, 9, 7]
 for m in range(g.ROWS):
     connect("MUX_OUT%d" % (m + 1), (U1.ref,) + ADC_PINS[m])
-# One UART per edge.  E and W get USART1/6 on the faster APB2 bus.
-UARTS = {"E": (("42", "PA9"), ("43", "PA10")),      # USART1, MUX7
-         "W": (("37", "PC6"), ("38", "PC7")),       # USART6, MUX8
-         "N": (("51", "PC10"), ("52", "PC11")),     # USART3, MUX7
-         "S": (("39", "PC8"), ("40", "PC9"))}       # UART8,  MUX7
+# One UART per edge, (TX, RX), each on the side of U1 its port is on.  W and S
+# are also UARTs the ROM bootloader listens on (DS Table 5: USART2 PA2/PA3,
+# USART3 PC10/PC11).  The IOMUX number of each pin is in RM chapter 6.
+UARTS = {"W": (("16", "PA2"), ("17", "PA3")),       # USART2
+         "N": (("37", "PC6"), ("38", "PC7")),       # USART6
+         "E": (("39", "PC8"), ("40", "PC9")),       # UART8
+         "S": (("51", "PC10"), ("52", "PC11"))}     # USART3
 for edge, (tx, rx) in UARTS.items():
     connect("%s_TX" % edge, (U1.ref,) + tx)
     connect("%s_RX" % edge, (U1.ref,) + rx)
@@ -168,9 +183,10 @@ cap("30p/50V", "HEXT_OUT", "GND", "mcu")
 # Programming: SWD plus BOOT0 (bridge to 3V3 to start the UART bootloader).
 # SMD pads on the back, reached with the cover off: a through-hole header
 # would sit under the switches and is taller than the 5 mm under the board.
+# The pads are in the order their tracks leave U1, so none of them cross.
 DBG = part("J", "Connector_Generic:Conn_01x06", "SWD",
            "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical_SMD_Pin1Left", "mcu", dnp=True)
-for pin, net in enumerate(["+3V3", "SWDIO", "SWCLK", "NRST", "GND", "BOOT0"], 1):
+for pin, net in enumerate(["+3V3", "BOOT0", "SWCLK", "NRST", "SWDIO", "GND"], 1):
     connect(net, (DBG.ref, pin))
 
 # -------------------------------------------------------------------- ports ---
