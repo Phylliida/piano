@@ -13,8 +13,9 @@ to add copper:
                                       to anywhere on the copper pad b hangs on
     r.join(net)                       connect() until the net is one piece
 
-Ground and ties() are for the last two stages of a routing script: a via to
-the front's ground pour at every ground pad, then vias between the pours.
+Ground, ties() and bridge() are for the last stages of a routing script: a via
+to the front's ground pour at every ground pad, vias between the pours, and one
+more wherever a part of the ground is still on its own.
 
 All keep the board's own clearances: the larger of the two nets' net-class
 clearances, 0.25 mm to holes and to the board edge.  KiCad's DRC stays the
@@ -37,6 +38,13 @@ HOLE_CLEAR = 0.25
 LAYER = {"F": pcbnew.F_Cu, "B": pcbnew.B_Cu}
 DIRS = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]
 _REMOVED = []
+
+
+def _drop(board, item):
+    """Take a track or a via off the board."""
+    board.Remove(item)
+    item.thisown = False                  # it is Python's now, which would complain of each at exit,
+    _REMOVED.append(item)                 # and KiCad crashes if Python frees a removed item
 
 
 def _pt_seg(px, py, ax, ay, bx, by):
@@ -299,8 +307,7 @@ class Router:
                 for l in "FB":
                     self.obs[l].remove(("C",) + it[1:5])
                 out.append(("C", it[1], it[2], it[3], 2 * it[4], pcbnew.ToMM(item.GetDrill())))
-            self.b.Remove(item)
-            _REMOVED.append(item)             # KiCad crashes if Python frees a removed item
+            _drop(self.b, item)
             del self.added[k], self._items[k]
         return out[::-1]
 
@@ -312,12 +319,67 @@ class Router:
             else:
                 self.via(it[1], it[2], it[3], size=it[4], drill=it[5])
 
+    def prune(self, nets):
+        """Take out what leads nowhere on these nets: a via with the net's copper
+        at it on one side only, and a track with an end that touches nothing;
+        again and again, until none is left.  Returns how many were taken out."""
+        mm = pcbnew.ToMM
+        gone = 0
+        for net in nets:
+            pads = [(on, box) for ref, num, n, x, y, box, on in self.terminals if n == net]
+            its = []                            # (kind, layers, ax, ay, bx, by, half width or radius, the board's item)
+            for t in self.b.GetTracks():
+                if t.GetNetname() != net:
+                    continue
+                if t.GetClass() == "PCB_VIA":
+                    x, y = mm(t.GetPosition().x), mm(t.GetPosition().y)
+                    its.append(("C", "FB", x, y, x, y, mm(t.GetWidth(pcbnew.F_Cu)) / 2, t))
+                else:
+                    its.append(("S", "F" if t.GetLayer() == pcbnew.F_Cu else "B", mm(t.GetStart().x),
+                                mm(t.GetStart().y), mm(t.GetEnd().x), mm(t.GetEnd().y), mm(t.GetWidth()) / 2, t))
+
+            def in_pad(x, y, l):
+                return any(l in on and x0 - 1e-6 <= x <= x1 + 1e-6 and y0 - 1e-6 <= y <= y1 + 1e-6
+                           for on, (x0, y0, x1, y1) in pads)
+
+            def end_held(o, x, y):
+                """Does this end of a track lie in a pad, in a via or on another track?"""
+                return in_pad(x, y, o[1]) or any(p is not o and o[1] in p[1] and _pt_seg(x, y, *p[2:6]) <= p[6] + 1e-6
+                                                 for p in its)
+
+            def via_held(o, l):
+                """Is there a pad at this via on a layer, or a track that ends in it or passes through its middle?"""
+                x, y, rad = o[2], o[3], o[6]
+                return in_pad(x, y, l) or any(
+                    p[1] == l and (_pt_seg(x, y, *p[2:6]) <= p[6] + 1e-6
+                                   or min(math.hypot(p[2] - x, p[3] - y), math.hypot(p[4] - x, p[5] - y)) <= rad + 1e-6)
+                    for p in its)
+
+            while True:
+                dead = [o for o in its if (not (via_held(o, "F") and via_held(o, "B")) if o[0] == "C" else
+                                           not (end_held(o, o[2], o[3]) and end_held(o, o[4], o[5])))]
+                if not dead:
+                    break
+                its = [o for o in its if not any(o is d for d in dead)]
+                for o in dead:
+                    same = lambda e: e[0] == o[0] and e[1] == net and \
+                        all(abs(u - v) < 1e-6 for u, v in zip(e[2:6] if o[0] == "S" else e[2:4], o[2:6]))
+                    for l in o[1]:
+                        self.obs[l].remove(next(e for e in self.obs[l] if same(e)))
+                    for k, it in enumerate(self.added):
+                        if it[0] == o[0] and it[1] == net and (o[0] == "C" or it[2] == o[1]) and \
+                                all(abs(u - v) < 1e-6 for u, v in zip(it[3:7] if o[0] == "S" else it[2:4], o[2:6])):
+                            del self.added[k], self._items[k]
+                            break
+                    _drop(self.b, o[7])
+                gone += len(dead)
+        return gone
+
     def remove_tracks(self, pred):
         """Delete existing tracks and vias for which pred(track) is true."""
         gone = [t for t in self.b.GetTracks() if pred(t)]
         for t in gone:
-            self.b.Remove(t)
-        _REMOVED.extend(gone)                 # KiCad crashes if Python frees a removed item
+            _drop(self.b, t)
         if gone:                              # rebuild the obstacle lists from the board
             keep = self.added, self._items
             self.__init__(self.b, self.keepouts, self.origin)
@@ -1094,3 +1156,116 @@ def ties(r, net="GND"):
                 near[k] = np.nan                # no via fits here after all
     bare = sum(1 for k, a in area.items() if a >= TIE_AREA and k not in has)
     print("ties: %d vias between the pours; %d cells of %d mm2 and more have none" % (n, bare, TIE_AREA))
+
+
+def copper(b, net="GND"):
+    """The pieces a net's copper falls into, pours included, as the board is filled
+    now, the one with the most in it first.  Each is {"pads": ["U1.63", ...],
+    "vias": [(x, y), ...], "pour": {"F": [its parts of the front's pour], "B": [...]}}."""
+    code = b.GetNetcodeFromNetname(net)
+
+    def shape(item, layer):
+        p = pcbnew.SHAPE_POLY_SET()
+        item.TransformShapeToPolygon(p, layer, 0, pcbnew.FromMM(0.005), pcbnew.ERROR_INSIDE)
+        return p
+
+    things = []                                 # (kind, what, {layer: shape}): a pad's name, a via's place, a pour's layer
+    for z in b.Zones():
+        if not z.GetIsRuleArea() and z.GetNetCode() == code:
+            for l, layer in LAYER.items():
+                if z.IsOnLayer(layer):
+                    things += [("pour", l, {l: isl[0]}) for isl in parts(z.GetFilledPolysList(layer))]
+    for fp in b.GetFootprints():
+        for pad in fp.Pads():
+            if pad.GetNetCode() == code:
+                things.append(("pad", "%s.%s" % (fp.GetReference(), pad.GetNumber()),
+                               {l: shape(pad, layer) for l, layer in LAYER.items() if pad.IsOnLayer(layer)}))
+    for t in b.GetTracks():
+        if t.GetNetCode() != code:
+            continue
+        if t.Type() == pcbnew.PCB_VIA_T:
+            at = (mm(t.GetPosition().x), mm(t.GetPosition().y))
+            things.append(("via", at, {l: shape(t, layer) for l, layer in LAYER.items()}))
+        else:
+            things.append(("track", None, {l: shape(t, layer) for l, layer in LAYER.items() if layer == t.GetLayer()}))
+    box = [{l: p.BBox() for l, p in t[2].items()} for t in things]
+    top = list(range(len(things)))
+
+    def find(i):
+        while top[i] != i:
+            top[i] = top[top[i]]
+            i = top[i]
+        return i
+
+    for i in range(len(things)):
+        for j in range(i + 1, len(things)):
+            if find(i) == find(j):
+                continue
+            for l, p in things[i][2].items():
+                if l in things[j][2] and box[i][l].Intersects(box[j][l]):
+                    both = pcbnew.SHAPE_POLY_SET(p)
+                    both.BooleanIntersection(things[j][2][l])
+                    if both.OutlineCount():
+                        top[find(i)] = find(j)
+                        break
+    groups = {}
+    for i, t in enumerate(things):
+        groups.setdefault(find(i), []).append(t)
+    return [{"pads": sorted(t[1] for t in g if t[0] == "pad"), "vias": sorted(t[1] for t in g if t[0] == "via"),
+             "pour": {l: [t[2][l] for t in g if t[:2] == ("pour", l)] for l in "FB"}}
+            for g in sorted(groups.values(), key=lambda g: -len(g))]
+
+
+def bridge(r, net="GND", w=0.3):
+    """ties() counts vias, not ways through: where tracks cut a part out of the
+    front's pour right over a part cut out of the back's, the vias between those
+    two join neither to the rest.  Here every piece of the net that is on its own
+    is joined to the main one: by a via from its pour into the main piece's on the
+    other side where the two lie on each other, else by a searched track.  Returns
+    the number of vias, the number of tracks, and the pads of the pieces left."""
+    vias = tracks = 0
+    left = []
+
+    def places(piece):
+        return [(x, y, on, box) for ref, num, n, x, y, box, on in r.terminals
+                if n == net and "%s.%s" % (ref, num) in piece["pads"]] + [(x, y, "FB", None) for x, y in piece["vias"]]
+
+    while True:
+        pcbnew.ZONE_FILLER(r.b).Fill(r.b.Zones())               # as KiCad will fill it: no islands
+        main, *rest = copper(r.b, net)
+        rest = [p for p in rest if (p["pads"], p["vias"]) not in left]
+        if not rest:
+            return vias, tracks, [", ".join(pads) or ("a via at (%.2f, %.2f)" % at[0] if at else "a track with no pad")
+                                  for pads, at in left]
+        piece = rest[0]
+        spots = []
+        for l, o in ("F", "B"), ("B", "F"):
+            for mine in piece["pour"][l]:
+                for theirs in main["pour"][o]:
+                    both = shrunk(mine, 0.3 + 0.15)
+                    both.BooleanIntersection(shrunk(theirs, 0.3 + 0.15))
+                    for one, x0, y0, x1, y1 in parts(both):
+                        spots += [(i * TIE_PITCH, j * TIE_PITCH)
+                                  for i in range(math.ceil(x0 / TIE_PITCH), math.floor(x1 / TIE_PITCH) + 1)
+                                  for j in range(math.ceil(y0 / TIE_PITCH), math.floor(y1 / TIE_PITCH) + 1)
+                                  if inside(one, i * TIE_PITCH, j * TIE_PITCH)]
+        for room in 0.1, 0.0:
+            fit = [p for p in spots if r.via_ok(net, p[0], p[1], 0.6, room=room)]
+            if fit:
+                break
+        if fit:
+            mx, my = sum(p[0] for p in fit) / len(fit), sum(p[1] for p in fit) / len(fit)
+            x, y = min(fit, key=lambda p: math.hypot(p[0] - mx, p[1] - my))
+            r.via(net, x, y, size=0.6, drill=0.3)
+            vias += 1
+            continue
+        src, dst = places(piece), places(main)
+        for pad in (3.0, 10.0) if src and dst else ():
+            try:
+                r.route(net, src, dst, layers="FB", w=w, via_cost=40, pad=pad, max_nodes=2000000)
+                tracks += 1
+                break
+            except RuntimeError:
+                continue
+        else:
+            left.append((piece["pads"], piece["vias"]))

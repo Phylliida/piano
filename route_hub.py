@@ -20,13 +20,16 @@ The stages, in order (ROUTE_STAGES=fine,usb runs only those):
   escapes  a short track and a via at each pad that the back's copper shuts
            in, for the long runs over the front to start and end on
   gnd      a via to the front's pour at every ground pad
-  signals  everything else, searched (pcbroute's joiner); what must cross the
-           wide tracks or the data pair hops over the front
-  ties     vias between the two pours where either is cut into pieces
+  signals  everything else, searched (pcbroute's joiner), on whichever side
+           has room; takes some three minutes
+  ties     vias between the two pours where either is cut into pieces, and a
+           way through to any part of the ground that is still on its own
 
-All parts but the LEDs and buttons are on the back, so the copper is too; the
-front is the ground plane, with the hops and little else.  Coordinates are
-KiCad's (mm, y down).
+All parts but the LEDs and buttons are on the back, and so is everything the
+first eight stages draw.  The front is ground pour, but not an unbroken plane:
+the back is full round the chips, so the searched runs take about as much of
+the front as they need (some 0.6 m of track), and cut its pour round the MCU
+into a large part and a few small ones.  Coordinates are KiCad's (mm, y down).
 """
 
 import json
@@ -504,15 +507,16 @@ TWICE = ("C20", "D2")                                                   # big pa
 
 
 def gnd(r):
-    """Ground is the pour on both sides.  The front's is the plane; the back's
+    """Ground is the pour on both sides.  The front's is the larger; the back's
     is cut into cells by everything else.  So every ground pad gets a via into
     the front's as near as one fits, and the few that none fits at a track to
     a neighbour's.  The sockets' shells, the LEDs and the user button go
-    through the board and need none.  The long runs cut the front's pour too,
-    into a few large pieces; ties() joins those through the back's."""
+    through the board and need none.  This comes before the long runs, so
+    that they go round these vias; they cut the front's pour too, and ties()
+    joins what they leave of it through the back's."""
     G = "GND"
     before = len(r.added)
-    g = pcbroute.Ground(r, least=20.0)          # the long runs cut the front's pour up; ties() joins the pieces
+    g = pcbroute.Ground(r, least=20.0)          # a part of the front's pour of 20 mm2 and more will do
     big, ANY = g.BIG, g.ANY
 
     # --- what is tied already: the pads that go through the board, the pins that have a via
@@ -592,7 +596,8 @@ def signals(r):
     they cross something.  A net that finds no way is tried again looking
     further; if there is still none, one of the others is in its way: each in
     turn, the nearest first, is taken out, and put back if that does not let
-    both through."""
+    both through.  At the end the escape vias that no search used come out
+    again, with the stubs to them."""
     start = len(r.added)
 
     def search(net, nodes):
@@ -654,13 +659,24 @@ def signals(r):
                 break
             r.take(None, mark)
             r.put(was)
+    n = r.prune(sorted({it[1] for it in r.added[start:]}))
+    if n:
+        say("signals: %d vias and track ends that a search left leading nowhere are taken out" % n)
     if lost:
         oops("no way found for %s" % ", ".join(sorted(lost)))
 
 
 def ties(r):
-    """Vias between the two pours, where the tracks cut either into cells."""
+    """Vias between the two pours, where the tracks cut either into cells.
+    That counts vias, not ways through: round U1 a cut-off part of the front's
+    pour can lie on a cut-off part of the back's.  So whatever part of the
+    ground is still on its own after that gets a via into the rest, or where
+    none fits a searched track to it."""
     pcbroute.ties(r)
+    vias, tracks, left = pcbroute.bridge(r)
+    print("ties: %d more vias and %d tracks, to parts of the ground that were on their own" % (vias, tracks))
+    if left:
+        oops("ground is cut off at %s" % "; ".join(left))
 
 
 # ------------------------------------------------------------------------ main ---
