@@ -1,32 +1,39 @@
-/* Where things go in an AT32F405RCT7: 256 KB of flash at 0x08000000 in
- * sectors of 2 KB, 102 KB of RAM at 0x20000000.
+/* What goes where inside one program for the AT32F405RCT7. Not given to the
+ * linker by itself: boot.ld, slot_a.ld and slot_b.ld say which part of the
+ * chip's flash the program is for (FLASH) and include this file. The map of
+ * the whole flash is in core/fw.h.
  *
- * The last flash sector (0x0803F800) is kept out of the program: it holds
- * the saved record (flash.c). The symbols are the ones Artery's startup
- * file (startup_at32f402_405.s) uses. */
+ * RAM is the same for all three: the chip's 102 KB at 0x20000000 without
+ * its first 16 bytes. The first word is where a program leaves a message
+ * for the bootloader across a reset (port.h, PORT_MAILBOX), so no program
+ * may keep a variable there.
+ *
+ * The symbols are the ones Artery's startup file (startup_at32f402_405.s)
+ * uses. */
 
 ENTRY(Reset_Handler)
-
-MEMORY
-{
-    FLASH  (rx)  : ORIGIN = 0x08000000, LENGTH = 254K
-    RECORD (r)   : ORIGIN = 0x0803F800, LENGTH = 2K
-    RAM    (xrw) : ORIGIN = 0x20000000, LENGTH = 102K
-}
 
 _estack = ORIGIN(RAM) + LENGTH(RAM);    /* the stack starts at the top of RAM */
 _min_stack = 0x1000;                    /* the link fails if less than this is left for it */
 
-_record_start = ORIGIN(RECORD);
-_record_size = LENGTH(RECORD);
+_image_start = ORIGIN(FLASH);           /* where this program begins: its vector table */
 
 SECTIONS
 {
+    /* The vector table, filled up to 0x200 bytes: that is where the
+     * bootloader and the tools look for an image's header (FW_HEADER_AT). */
     .isr_vector :
     {
         . = ALIGN(4);
         KEEP(*(.isr_vector))
-        . = ALIGN(4);
+        . = ALIGN(0x200);
+    } >FLASH
+    ASSERT(SIZEOF(.isr_vector) == 0x200, "the vector table does not end at 0x200")
+
+    /* The image's header (port.h, PORT_IMAGE_HEADER). The bootloader has none. */
+    .fw_header :
+    {
+        KEEP(*(.fw_header))
     } >FLASH
 
     .text :
@@ -105,16 +112,6 @@ SECTIONS
         . = ALIGN(4);
         _ebss = .;
         __bss_end__ = _ebss;
-    } >RAM
-
-    /* Variables nobody touches at start, so they live through a reset:
-     * the word that says "go to the bootloader" (port.c). */
-    .noinit (NOLOAD) :
-    {
-        . = ALIGN(4);
-        *(.noinit)
-        *(.noinit*)
-        . = ALIGN(4);
     } >RAM
 
     /* Nothing is put here; it only makes the link fail when the stack

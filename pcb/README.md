@@ -203,8 +203,11 @@ draws microamps.
 - **Flashing without a probe** (plan, untested): bridge J1 pad 1 (3V3) to
   pad 2 (BOOT0), its neighbour, while the tile powers up, and the factory
   bootloader waits on the W and S ports; the hub sends the firmware down a
-  cable plugged into one of those (`firmware/tools/flash_tile.py --rom`,
-  tested against a simulated hub and an imitation of the bootloader only).
-  Only the first flash needs the bridge:
-  after that, firmware can enter the bootloader on the hub's command. Not
-  yet checked: whether a blank chip starts the bootloader by itself.
+  cable plugged into one of those (`firmware/tools/flash_tile.py --rom`
+  with `tile_factory.bin`, tested against a simulated hub and an imitation
+  of the bootloader only). Only a tile's first flash needs the bridge and
+  the cable in that port. What it gets then includes our own bootloader,
+  and from there on new firmware comes through the hub to every tile,
+  wherever among the tiles it is and whichever port leads to the hub
+  (`firmware/tools/update.py`, tested in the simulator only). Not yet
+  checked: whether a blank chip starts the factory bootloader by itself.

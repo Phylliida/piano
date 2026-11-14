@@ -10,6 +10,8 @@
 #include "tile.h"
 #include "uart.h"
 
+PORT_IMAGE_HEADER(KIND_TILE);
+
 /* ------------------------------------------------------------------- scan ---
  *
  * One select value puts one key of each row on the five mux outputs. A
@@ -17,7 +19,14 @@
  * the five outputs one after the other (16 us in all) and DMA stores the
  * five values. The interrupt at the end of that files them under their
  * keys and sets the next select value, which then has 46 us to settle.
- * Eight steps make a scan: 2000 scans a second. */
+ * Eight steps make a scan: 2000 scans a second.
+ *
+ * While flash is erased or written the chip stands still and the interrupt
+ * comes late: the next select value is then set in the middle of a
+ * conversion, or just before one, and readings of one key are filed under
+ * another. So a scan with flash work in it is not handed on, nor are the
+ * two after it (flash_begins(), flash_ends()). They are still counted: the
+ * scan's number is the keys' clock. */
 #define SCAN_HZ     2000u
 #define STEPS       8u                      /* select values */
 #define STEP_HZ     (SCAN_HZ * STEPS)
@@ -32,7 +41,9 @@ static uint16_t finished[KEYS_N];           /* the last whole scan */
 static volatile uint32_t scans_done;
 static volatile bool scan_ready;
 static uint8_t step;
-static uint32_t scans_missed;               /* scans that went by while flash was written */
+static uint32_t scans_missed;               /* scans that went by while flash was erased */
+static volatile bool flash_busy;            /* flash is being erased or written */
+static volatile uint8_t scans_spoiled;      /* this many scans from now are not to be trusted */
 
 static void select_set(uint8_t value)
 {
@@ -53,10 +64,35 @@ void DMA1_Channel1_IRQHandler(void)
     step = (uint8_t)((step + 1) % STEPS);
     select_set(step);
     if (step == 0) {
-        memcpy(finished, building, sizeof finished);
         scans_done++;
-        scan_ready = true;
+        if (flash_busy) {
+            /* this one and what follows it: flash_ends() says how many */
+        } else if (scans_spoiled) {
+            scans_spoiled--;
+        } else {
+            memcpy(finished, building, sizeof finished);
+            scan_ready = true;
+        }
     }
+}
+
+static void flash_begins(void)
+{
+    flash_busy = true;
+}
+
+/* `since`, `scans`: port_ms() and scans_done from before the flash work.
+ * While the chip stood still whole scans were not made at all, and the
+ * scan counter has to be told how many they were. */
+static void flash_ends(uint32_t since, uint32_t scans)
+{
+    uint32_t due = (port_ms() - since) * (SCAN_HZ / 1000u), came = scans_done - scans;
+
+    /* port_ms() counts whole milliseconds: two scans more or less is no news */
+    if (due > came + 2)
+        scans_missed += due - came;
+    scans_spoiled = 2;
+    flash_busy = false;
 }
 
 static void scan_start(void)
@@ -143,21 +179,45 @@ static uart_t uart[TILE_PORTS];
 static tile_t tile;
 
 /* Write the record. The chip stands still for most of the 20 ms this takes:
- * bytes that arrive wait in the UARTs' rings, the scans of that time are
- * lost, and the scan counter has to be told how many they were. */
+ * bytes that arrive wait in the UARTs' rings, and the scans of that time
+ * are lost. */
 static void save(void)
 {
     static uint8_t image[STORE_TILE_LEN];
     uint32_t t0 = port_ms(), s0 = scans_done;
 
     tile_save_image(&tile, image);
+    flash_begins();
     bool ok = flash_save(image, sizeof image);
-
-    uint32_t due = (port_ms() - t0) * (SCAN_HZ / 1000u), came = scans_done - s0;
-    if (due > came)
-        scans_missed += due - came;
+    flash_ends(t0, s0);
     tile_save_done(&tile, ok);
 }
+
+/* A new program for the other slot (core/fw.h): the same, a sector's erase
+ * (18 ms) or up to 48 bytes (under a millisecond) at a time. */
+static bool program_erase(void *ctx, uint32_t addr)
+{
+    uint32_t t0 = port_ms(), s0 = scans_done;
+
+    flash_begins();
+    bool ok = flash_fw_erase(ctx, addr);
+    flash_ends(t0, s0);
+    return ok;
+}
+
+static bool program_write(void *ctx, uint32_t addr, const uint8_t *data, uint32_t len)
+{
+    uint32_t t0 = port_ms(), s0 = scans_done;
+
+    flash_begins();
+    bool ok = flash_fw_program(ctx, addr, data, len);
+    flash_ends(t0, s0);
+    return ok;
+}
+
+static const fw_flash_t program_flash = {
+    (const uint8_t *)FW_FLASH_BASE, NULL, program_erase, program_write
+};
 
 int main(void)
 {
@@ -166,18 +226,19 @@ int main(void)
     uint8_t uid[12], wire[FRAME_MAX_WIRE];
     uint32_t last_tick;
 
-    port_boot_check();
     port_init(false);
     port_uid(uid);
     for (unsigned p = 0; p < TILE_PORTS; p++)
         uart_init(&uart[p], &uart_hw[p]);
     tile_init(&tile, uid, flash_record(), STORE_TILE_LEN, SCAN_HZ, port_ms());
+    tile_set_flash(&tile, &program_flash, port_slot());
     scan_start();
     last_tick = port_ms();
 
     for (;;) {
         uint32_t now = port_ms();
 
+        port_alive();
         for (unsigned p = 0; p < TILE_PORTS; p++) {
             size_t n = uart_read(&uart[p], buf, sizeof buf);
             if (n)

@@ -21,6 +21,15 @@ In both, the tile's chip is an imitation: its flash, and a ROM bootloader
 that follows the device-side flowcharts of Artery's PM0005. Time is the
 test's own, a millisecond a step, so a run takes little real time.
 
+Which program starts from that flash is imitated too. Most scenarios flash
+a pretend program of the old kind, one that begins at the start of flash
+(`make_image`). The ones with a factory file (`make_factory`) have our
+bootloader in front, and the slot it would start is found by
+`bootloader_starts`, core/fw.c's rules once more. With the real hub the
+flash is also handed to hubsim's tile, so that there core/fw.c itself
+chooses, and its answer to `fw` is what the script reads; `check_model`
+compares the two.
+
 What a real ROM does, and what the hub's USB and UART code does (hub/main.c
 is copied into hubsim.c, not run), is not tested here.
 """
@@ -39,6 +48,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "tools"))
 
 import flash_tile  # noqa: E402
+import mkimage  # noqa: E402
 
 FLASH_BASE = 0x08000000
 FLASH_SIZE = 0x40000
@@ -62,8 +72,109 @@ def make_image(version, size=5000):
     return bytes(b)
 
 
+def make_boot(size=2192):
+    """A pretend bootloader: stack, start, filler."""
+    b = bytearray((i * 11 + 3) & 0xFF for i in range(size))
+    struct.pack_into("<II", b, 0, 0x20019800, 0x08000101)
+    b[8:10] = b"BL"
+    return bytes(b)
+
+
+def make_slot_program(version, slot=0, size=5000, kind=0):
+    """A pretend program linked for a slot, as the linker leaves one: the
+    header's length is not filled in."""
+    base = mkimage.SLOT_ADDR[slot]
+    b = bytearray((i * 7 + version) & 0xFF for i in range(size - 4))
+    struct.pack_into("<II", b, 0, 0x20019800, base + 0x301)
+    mkimage.HEADER.pack_into(b, mkimage.HEADER_AT, mkimage.IMAGE_MAGIC, kind, 0, version, base, 0)
+    return bytes(b)
+
+
+def make_slot_image(version, slot=0, size=5000, kind=0):
+    """The same as an image of `size` bytes: what tools/update.py sends."""
+    return mkimage.make_image(make_slot_program(version, slot, size, kind))
+
+
+def make_factory(version, size=5000):
+    """A pretend factory file: bootloader, the program in slot A, blank up
+    to the settings."""
+    return mkimage.make_factory(make_boot(), make_slot_image(version, 0, size))
+
+
+# A slot's last 16 bytes, as core/fw.h has them.
+TRAILER = struct.Struct("<4I")          # magic, number, tried, ok
+TRAILER_MAGIC = 0x4C525450
+ERASED = 0xFFFFFFFF
+
+
+def slot_at(slot):
+    return mkimage.SLOT_ADDR[slot] - FLASH_BASE
+
+
+def put_trailer(flash, slot, state, seq):
+    """The trailer of a slot in this state: "new", "tried" or "good"."""
+    marks = {"new": (ERASED, ERASED), "tried": (0, ERASED), "good": (0, 0)}[state]
+    TRAILER.pack_into(flash, slot_at(slot) + mkimage.SLOT_LEN - TRAILER.size,
+                      TRAILER_MAGIC, seq, *marks)
+
+
+def slot_of(flash, slot):
+    """(state, number, image) of a slot, as core/fw.c reads them: the state
+    by the console's name for it, the image as mkimage.Image, or None if
+    the slot holds no whole one."""
+    base = slot_at(slot)
+    words = TRAILER.unpack_from(flash, base + mkimage.SLOT_LEN - TRAILER.size)
+    magic, seq, tried, ok = words
+    if magic != TRAILER_MAGIC:
+        state, seq = ("none" if words == (ERASED,) * 4 else "partial"), 0
+    elif ok != ERASED:
+        state = "good"
+    elif tried != ERASED:
+        state = "tried"
+    else:
+        state = "new"
+    try:
+        image = mkimage.parse(bytes(flash[base:base + mkimage.IMAGE_MAX]))
+        if image.slot != slot:
+            image = None
+    except mkimage.Bad:
+        image = None
+    return state, seq, image
+
+
+def bootloader_starts(flash):
+    """The slot the bootloader starts, or None: fw_boot_choose() of
+    core/fw.c. Only a whole image; a new one first, then a good one, one
+    without a trailer, one that was tried; of two alike the one with the
+    higher number, and slot A if that is the same too. (That a new one is
+    marked as tried on the way is left out: no test here has a new one.)"""
+    order = {"new": 0, "good": 1, "none": 2, "tried": 3}
+    found = []
+    for slot in (0, 1):
+        state, seq, image = slot_of(flash, slot)
+        if image is not None and state in order:
+            found.append((order[state], -seq, slot))
+    return min(found)[2] if found else None
+
+
+def has_bootloader(flash):
+    """Does this flash begin with a bootloader, and not with a pretend
+    program of make_image()?"""
+    if flash[8:10] == b"FW":
+        return False
+    boot = bytes(flash[:mkimage.BOOT_LEN]).rstrip(b"\xff")
+    try:
+        mkimage.check_boot(boot + b"\xff" * (-len(boot) % 4))
+    except mkimage.Bad:
+        return False
+    return True
+
+
 def program_in(flash):
-    """The version of the whole program in this flash, or None."""
+    """The version of the program that starts from this flash, or None."""
+    if has_bootloader(flash):
+        slot = bootloader_starts(flash)
+        return None if slot is None else slot_of(flash, slot)[2].version
     if flash[8:10] != b"FW":
         return None
     size = struct.unpack_from("<I", flash, 12)[0]
@@ -112,6 +223,7 @@ class World:
         self.mode = "app"               # "app", "rom", or "dead": neither runs
         self.app_since = -2500          # not long: see tile_has_been_up()
         self.answers = True             # the tile acknowledges commands
+        self.answers_fw = True          # and the question what it runs
         self.jump_works = True          # BOOTLOADER gets it into the ROM
         self.boot0 = False              # BOOT0 pad held at 3.3 V
         self.flash = bytearray(b"\xff" * FLASH_SIZE)
@@ -128,6 +240,7 @@ class World:
         self.knows_reset = True
         self.corrupt = None             # flash offset whose write goes wrong
         self.dies_after_writes = None
+        self.erase_fails = set()        # sectors it says it erased, and did not
         self.erased = []
         self.writes = []                # (offset, length)
         self.reads = 0
@@ -221,6 +334,16 @@ class World:
     def make_blank(self):
         self.flash[:RECORD] = b"\xff" * RECORD
         self.tile_is_dead()
+
+    def flash_holds(self, data):
+        """What the tile's program flash holds, and so which program runs."""
+        self.flash[:RECORD] = b"\xff" * RECORD
+        self.flash[:len(data)] = data
+        self.info["fw"] = program_in(self.flash)
+        self.tile_changed()
+
+    def check_model(self):
+        pass
 
     def just_plugged(self):
         """The hub has only now got its power, and has heard no tile yet."""
@@ -370,6 +493,28 @@ class World:
                 self.later(500, lambda: (self.say("tile 0: no answer"),
                                          self.say("error: 1 failed")))
                 return
+        elif name == "fw":
+            if len(args) != 1 or args[0] in ("all", "hub"):
+                raise AssertionError("the imitation knows `fw <tile>` and no more: " + text)
+            if self.ms < self.quiet_until:
+                error = "the cable is quiet"
+            elif not self.tile_named(args[0]):
+                error = "no such tile"
+            elif self.mode == "app" and self.answers and self.answers_fw:
+                # a program of the old kind has no such command
+                said = self.fw_line() if has_bootloader(self.flash) else None
+                self.busy_until = self.ms + 3
+                if said:
+                    self.later(3, lambda: (self.say(said), self.say("ok")))
+                else:
+                    self.later(3, lambda: (self.say("tile 0: does not know that"),
+                                           self.say("error: 1 failed")))
+                return
+            else:
+                self.busy_until = self.ms + 500
+                self.later(500, lambda: (self.say("tile 0: no answer"),
+                                         self.say("error: 1 failed")))
+                return
         elif name == "bridge":
             b = {"baud": 0, "parity": "e", "used": False,
                  "way": "swapped" if self.hub_swapped else "straight"}
@@ -391,6 +536,15 @@ class World:
             error = "no such command (try help)"
         self.say("error: " + error if error else "ok")
 
+    def fw_line(self):
+        """core/console.c: show_fw()."""
+        slot = bootloader_starts(self.flash)
+        state, _, image = slot_of(self.flash, slot)
+        other_state, _, other = slot_of(self.flash, 1 - slot)
+        return "tile 0: runs %s %s %04x %08x, other %s %s" % (
+            "ab"[slot], state, image.version, image.crc, other_state,
+            "%08x" % other.crc if other else "-")
+
     def bridge_on(self):
         self.bridge = self.bridge_soon
         self.bridge_soon = None
@@ -407,6 +561,9 @@ class World:
             self.mode = "app"
             self.app_since = self.ms
             self.link_since = None
+        elif has_bootloader(self.flash):
+            self.enter_rom()            # boot/main.c: no program to start
+            return
         else:
             self.mode = "dead"
         self.tile_changed()
@@ -541,7 +698,8 @@ class World:
                     self.rom_say(NACK)
                     continue
                 for s in sectors:
-                    self.flash[s * SECTOR:(s + 1) * SECTOR] = b"\xff" * SECTOR
+                    if s not in self.erase_fails:
+                        self.flash[s * SECTOR:(s + 1) * SECTOR] = b"\xff" * SECTOR
                     self.erased.append(s)
                 self.rom_say(ACK, after=16 * len(sectors))
             elif code == 0x21:                          # Jump
@@ -573,7 +731,10 @@ class SimWorld(World):
 
     The tile's chip stays here: its flash and its ROM. The tile's program
     in the simulator is core/'s whatever that flash holds, so the firmware
-    version the hub reports is always the same one."""
+    version the hub reports is always the same one. A flash with a
+    bootloader in it is handed to the simulator's tile at every start:
+    which slot runs, and what the tile says of its slots, is then core/'s
+    doing."""
 
     warm_up = 3000              # ms the hub has been on when the script starts
 
@@ -615,8 +776,8 @@ class SimWorld(World):
             return
         self.begun = True
         self.pipe("w " + self.hub_port)
-        if self.mode != "app":
-            self.pipe("p 0")
+        if self.mode != "app" or has_bootloader(self.flash):
+            self.tile_changed()
         self.idle(self.warm_up)
 
     def idle(self, ms):
@@ -638,7 +799,7 @@ class SimWorld(World):
         if self.cable_out:
             self.pipe("c " + self.cable_out.hex())
             self.cable_out.clear()
-        frames, tile, word, pc, cable = self.pipe("s").split()
+        frames, tile, word, pc, cable, _hub, _ran = self.pipe("s").split()
 
         self.word = word
         if "," in word:
@@ -694,7 +855,37 @@ class SimWorld(World):
         # hubsim's tile runs core/'s program, or is off: in its ROM, or with
         # nothing in its flash, a tile says nothing either
         if self.begun:
-            self.pipe("p 1" if self.mode == "app" else "p 0")
+            self.pipe("p 0")
+            if self.mode == "app":
+                self.load_chip()
+                self.pipe("p 1")
+
+    def load_chip(self):
+        """Give hubsim's tile this flash, if a bootloader is in it."""
+        if not has_bootloader(self.flash):
+            return
+        self.pipe("f 0 -")
+        for at in range(0, RECORD, 4096):
+            piece = bytes(self.flash[at:min(at + 4096, RECORD)])
+            if piece.strip(b"\xff"):
+                self.pipe("f 0 %x %s" % (at, piece.hex()))
+
+    def check_model(self):
+        """core/fw.c in hubsim's tile and this file's imitation of it have
+        to agree on what the flash holds and which slot runs."""
+        if self.mode != "app" or not has_bootloader(self.flash):
+            return
+        self.run(0.05)                  # a start takes 20 ms
+        slot = bootloader_starts(self.flash)
+        want = ["ab"[slot], "0", "run"]
+        for i in (0, 1):
+            state, _, image = slot_of(self.flash, i)
+            want.append(state)
+            want += ["%04x" % image.version, "%08x" % image.crc] if image else ["-", "-"]
+        got = self.pipe("q 0").split()[:len(want)]
+        if got != want:
+            raise AssertionError("hubsim's tile: %s; the imitation: %s"
+                                 % (" ".join(got), " ".join(want)))
 
     def just_plugged(self):
         self.warm_up = 0
@@ -759,6 +950,11 @@ class FakePort:
         self.is_open = False
 
 
+def make_crc(version, slot):
+    """The checksum of make_slot_image(version, slot)."""
+    return mkimage.parse_image(make_slot_image(version, slot)).crc
+
+
 def nobody(text):
     raise AssertionError("the script asked a question: " + text)
 
@@ -818,6 +1014,7 @@ class Scenarios:
         self.assertNotIn(RECORD // SECTOR, w.erased)
         for at, n in w.writes:
             self.assertLessEqual(at + n, RECORD)
+        w.check_model()
 
     def check_flashed(self, image=None):
         w = self.world
@@ -846,6 +1043,9 @@ class Scenarios:
         blocks = -(-len(self.image) // 256)
         self.assertEqual(self.world.commands,
                          [0x01, 0x02, 0x11] + [0x44] * 3 + [0x31] * blocks + [0x11] * blocks + [0xD4])
+        # a program of the old kind: said so, and not asked what it runs
+        self.assertIn("not a factory file", self.out)
+        self.assertEqual(self.typed("fw"), [])
 
     def test_tile_that_has_been_up_for_long(self):
         self.world.tile_has_been_up(40)
@@ -965,6 +1165,168 @@ class Scenarios:
         self.world.just_plugged()
         self.assertEqual(self.run_script(), 0, self.out)
         self.check_flashed()
+
+    # -- a factory file: bootloader, program, and the rest of the chip blank --
+
+    def updated_tile(self):
+        """The tile got version 3 through the hub some time ago, into slot
+        B, and runs it."""
+        w = self.world
+        flash = bytearray(make_factory(1))
+        put_trailer(flash, 0, "good", 1)
+        new = make_slot_image(3, slot=1)
+        flash[slot_at(1):slot_at(1) + len(new)] = new
+        put_trailer(flash, 1, "good", 2)
+        w.flash_holds(flash)
+        w.run(0.1)
+        w.check_model()
+        self.assertEqual(program_in(w.flash), 3)
+
+    def test_factory_file(self):
+        w = self.world
+        self.image = make_factory(2)
+        self.assertEqual(self.run_script(), 0, self.out)
+        self.check_flashed()
+        self.assertEqual(w.erased, list(range(126)))    # all but the free sector and the settings
+        # the bootloader is 9 blocks and the program 20; nothing blank is written
+        self.assertEqual(len(w.writes), 29)
+        for at, n in w.writes:
+            self.assertTrue(self.image[at:at + n].strip(b"\xff"), at)
+        # read back: the 5 sectors something was written to, 8 blocks each,
+        # and both ends of the other 121
+        self.assertEqual(w.commands, [0x01, 0x02, 0x11] + [0x44] * 126 + [0x31] * 29
+                         + [0x11] * (40 + 242) + [0xD4])
+        self.assertIn("a factory file: the bootloader, and in slot A the tile's program, "
+                      "version 0002", self.out)
+        self.assertIn("is back, firmware " + w.reported(2), self.out)
+        self.assertIn("it runs what was flashed: slot A, version 0002, crc %08x"
+                      % mkimage.parse_factory(self.image).crc, self.out)
+        self.assertEqual(self.typed("fw"), ["fw " + self.tile])
+        self.assertEqual(w.mode, "app")
+
+    def test_factory_file_over_a_tile_that_was_updated(self):
+        # Slot B holds a newer program than the file's, with a trailer that
+        # says it is good. All of it has to go, or it would run again.
+        w = self.world
+        self.updated_tile()
+        self.image = make_factory(2)
+        self.assertEqual(self.run_script(), 0, self.out)
+        self.assertIn("on the hub's cable, by its W port; firmware " + w.reported(3), self.out)
+        self.check_flashed()
+        self.assertEqual(bytes(w.flash[slot_at(1):RECORD]), b"\xff" * (RECORD - slot_at(1)))
+        self.assertEqual(program_in(w.flash), 2)
+        self.assertIn("it runs what was flashed: slot A, version 0002", self.out)
+
+    def test_factory_file_again(self):
+        self.world.flash_holds(make_factory(2))
+        self.image = make_factory(2)
+        self.assertEqual(self.run_script(), 0, self.out)
+        self.check_flashed()
+        self.assertIn("it runs what was flashed: slot A", self.out)
+
+    def test_a_sector_that_was_not_erased_shows(self):
+        # the second sector of the program left in slot B: nothing is
+        # written there, and the read back still finds it
+        self.updated_tile()
+        self.world.erase_fails = {66}
+        self.image = make_factory(2)
+        self.assertEqual(self.run_script(), 1)
+        self.assertIn("is not what was written: at 0x08021000 it reads 0x03, the program "
+                      "has 0xff", self.out)
+        self.assertIn("no complete program", self.out)
+        self.check_left_tidy()
+
+    def test_a_trailer_that_was_not_erased_shows(self):
+        self.updated_tile()
+        self.world.erase_fails = {125}
+        self.image = make_factory(2)
+        self.assertEqual(self.run_script(), 1)
+        self.assertIn("is not what was written: at 0x0803eff0 it reads 0x50, the program "
+                      "has 0xff", self.out)
+        self.check_left_tidy()
+
+    def test_the_tile_says_if_it_runs_something_else(self):
+        # Nothing of slot B is erased and nothing is read back: the tile
+        # comes back with the program that was left there, and says so.
+        w = self.world
+        self.updated_tile()
+        w.erase_fails = set(range(65, 126))
+        self.image = make_factory(2)
+        self.assertEqual(self.run_script("--no-verify"), 1)
+        self.assertIn("is back, firmware " + w.reported(3), self.out)
+        self.assertIn("it runs another program than the one just flashed", self.out)
+        self.assertIn("the one in slot B, version 0003, crc %08x" % make_crc(3, 1), self.out)
+        self.assertEqual(program_in(w.flash), 3)
+        self.check_left_tidy()
+
+    def test_factory_file_check_changes_nothing(self):
+        before = bytes(self.world.flash)
+        self.image = make_factory(2)
+        self.assertEqual(self.run_script("--check"), 0, self.out)
+        self.assertEqual(bytes(self.world.flash), before)
+        self.assertIn("a factory file", self.out)
+        self.assertIn("nothing was changed", self.out)
+        self.assertEqual(self.typed("fw"), [])
+        self.check_left_tidy()
+
+    def test_blank_tile_gets_the_factory_file(self):
+        self.world.make_blank()
+        self.image = make_factory(2)
+        asked = []
+
+        def user(text):
+            asked.append(text)
+            if len(asked) == 2:
+                self.world.run(8)               # finding the pads
+                self.reset_into_rom()
+
+        self.assertEqual(self.run_script("--rom", prompt=user), 0, self.out)
+        self.assertEqual(self.typed("quiet"), ["quiet 30000"])
+        self.check_flashed()
+        self.assertIn("it runs what was flashed: slot A, version 0002", self.out)
+
+    def test_bootloader_without_a_program_goes_to_the_rom(self):
+        # The flashing stops when the bootloader is in and the program is
+        # not: restarted, such a tile is in its ROM again, and the second
+        # run needs nobody to hold a pad.
+        w = self.world
+        self.image = make_factory(2)
+        w.dies_after_writes = 12
+        self.assertEqual(self.run_script(), 1)
+        self.assertIn("no complete program", self.out)
+        self.check_left_tidy()
+        self.assertTrue(has_bootloader(w.flash))
+        self.assertIsNone(program_in(w.flash))
+
+        w.dies_after_writes = None
+        w.erased = []
+        w.run(25)                               # the first run's quiet runs out
+        asked = []
+
+        def user(text):
+            asked.append(text)
+            if len(asked) == 2:
+                w.start_tile()                  # power off and on, no pad
+
+        self.assertEqual(self.run_script("--rom", prompt=user), 0, self.out)
+        self.check_flashed()
+        self.assertIn("it runs what was flashed: slot A, version 0002", self.out)
+
+    def test_the_real_factory_file(self):
+        path = os.path.join(HERE, "..", "build", "tile", "tile_factory.bin")
+        if not os.path.exists(path):
+            self.skipTest("build/tile/tile_factory.bin is not built (`make tile`)")
+        with open(path, "rb") as f:
+            self.image = f.read()
+        program = mkimage.parse_factory(self.image)
+        self.assertEqual(self.run_script(), 0, self.out)
+        self.check_flashed()
+        self.assertIn("it runs what was flashed: slot A, version %04x, crc %08x"
+                      % (program.version, program.crc), self.out)
+        # the quiet was long enough for all of it
+        quiet = int(self.typed("bootloader")[0].split()[2])
+        self.assertLess(quiet, 60000)
+        self.assertNotIn("the cables stay quiet for another 0 s", self.out)
 
     # -- stopping before anything is changed --------------------------------
 
@@ -1213,6 +1575,15 @@ class ImitationTest(Scenarios, unittest.TestCase):
         self.assertIn("the cables stay quiet", self.out)
         self.check_untouched()
 
+    def test_tile_does_not_say_what_it_runs(self):
+        # not the flashing's fault, and not a reason to call it failed
+        self.world.answers_fw = False
+        self.image = make_factory(2)
+        self.assertEqual(self.run_script(), 0, self.out)
+        self.check_flashed()
+        self.assertIn("which program the tile runs could not be asked: tile 0: no answer",
+                      self.out)
+
     def test_not_the_hub(self):
         self.world.command = lambda text: self.world.say("error: no such command")
         self.assertEqual(self.run_script(), 1)
@@ -1244,6 +1615,7 @@ class PiecesTest(unittest.TestCase):
             raise AssertionError("the port was opened")
 
         good = make_image(2)
+        factory = make_factory(2)
         cases = {
             "too big": (make_image(2, RECORD + 4), "room for"),
             "elf": (b"\x7fELF" + good, "ELF"),
@@ -1253,6 +1625,14 @@ class PiecesTest(unittest.TestCase):
             "start": (good[:4] + struct.pack("<I", 0x08000100) + good[8:], "start address"),
             "far start": (good[:4] + struct.pack("<I", 0x08010001) + good[8:], "start address"),
             "hub": (good + b"piano hub, firmware %04x", "the hub's program"),
+            "image": (make_slot_image(2), "tools/update.py"),
+            "image for slot b": (make_slot_image(2, slot=1), "tools/update.py"),
+            "linked for a slot": (make_slot_program(2), "tools/update.py"),
+            "hub's factory file": (mkimage.make_factory(make_boot(), make_slot_image(2, kind=1)),
+                                   "the hub's factory file"),
+            "broken": (factory[:0x3000] + b"\x00" + factory[0x3001:], "not a whole one"),
+            "more than a factory file": (factory[:slot_at(1)] + make_slot_image(3, slot=1)
+                                         + factory[slot_at(1) + 5000:], "not a whole one"),
         }
         for name, (data, words) in cases.items():
             out = io.StringIO()
@@ -1296,22 +1676,91 @@ class PiecesTest(unittest.TestCase):
         with self.assertRaises(AssertionError):
             rom.write(0x08000000, b"\x00" * 257)
 
+    def test_what_the_tile_says_it_runs(self):
+        program = mkimage.parse_factory(make_factory(2))
+        crc = "%08x" % program.crc
+
+        def check(*lines):
+            hub, out = mock.Mock(), mock.Mock()
+            hub.ask.return_value = list(lines)
+            flash_tile.check_runs(hub, mock.Mock(id="1234abcd"), program, out)
+            hub.ask.assert_called_once_with("fw 1234abcd", 4.0)
+            return out.say.call_args[0][0]
+
+        self.assertIn("it runs what was flashed: slot A, version 0002, crc " + crc,
+                      check("tile 0: runs a none 0002 %s, other none -" % crc))
+        self.assertIn("it runs what was flashed",
+                      check("tile 0: runs a good 0002 %s, other new 00000001, staged" % crc))
+        for line in ("tile 0: runs b good 0002 %s, other none -" % crc,
+                     "tile 0: runs a none 0002 00000001, other none -"):
+            with self.assertRaises(flash_tile.Failure) as c:
+                check(line)
+            self.assertIn("it runs another program", str(c.exception))
+        self.assertIn("could not be asked", check())
+        self.assertIn("could not be asked", check("tile 0: runs c none 0002 %s, other none -" % crc))
+
     def test_quiet_grows_with_the_program(self):
-        small = flash_tile.flash_time(15120, 115200)
+        small = flash_tile.flash_time(make_image(2, 15120), 115200)
         self.assertLess(small, 10)
-        self.assertGreater(flash_tile.flash_time(15120, 9600), small)
-        self.assertGreater(flash_tile.flash_time(200000, 115200), small)
+        self.assertGreater(flash_tile.flash_time(make_image(2, 15120), 9600), small)
+        self.assertGreater(flash_tile.flash_time(make_image(2, 200000), 115200), small)
+        # a factory file is the whole chip, and most of it takes no time
+        factory = flash_tile.flash_time(make_factory(2, 15120), 115200)
+        self.assertGreater(factory, small)
+        self.assertLess(factory, 20)
+
+    def test_plan(self):
+        image = make_factory(2)
+        sectors, writes, reads = flash_tile.plan(image)
+        self.assertEqual(sectors, 126)
+        # what is written is the file, less its blank blocks
+        made = bytearray(b"\xff" * len(image))
+        for at, data in writes:
+            self.assertEqual(at % 256, 0)
+            self.assertLessEqual(len(data), 256)
+            self.assertTrue(data.strip(b"\xff"))
+            made[at:at + len(data)] = data
+        self.assertEqual(bytes(made), image)
+        # every sector is read at both its ends, and all of it if something
+        # was written to it
+        looked = set()
+        for at, n in reads:
+            self.assertTrue(1 <= n <= 256)
+            self.assertLessEqual(at + n, len(image))
+            looked.update(range(at, at + n))
+        wrote = {at // SECTOR for at, _ in writes}
+        for s in range(sectors):
+            self.assertIn(s * SECTOR, looked)
+            self.assertIn(s * SECTOR + SECTOR - 1, looked)
+            if s in wrote:
+                self.assertTrue(set(range(s * SECTOR, (s + 1) * SECTOR)) <= looked, s)
+        self.assertEqual(sorted(reads), reads)
+
+        # a file that ends in the middle of a sector, in a blank stretch
+        image = make_image(2, 2048) + b"\xff" * 1024 + b"\x00" * 4 + b"\xff" * 1020 + b"\xff" * 20
+        sectors, writes, reads = flash_tile.plan(image)
+        self.assertEqual(sectors, 3)
+        self.assertEqual([at for at, _ in writes], list(range(0, 2048, 256)) + [3072])
+        self.assertEqual(reads[-1], (4096, 20))
+        self.assertEqual(sum(n for _, n in reads), 2048 + 2048 + 20)
 
     def test_the_real_tile_program_passes(self):
-        here = os.path.dirname(os.path.abspath(__file__))
-        path = os.path.join(here, "..", "build", "tile", "tile.bin")
+        def built(*name):
+            return os.path.join(HERE, "..", "build", *name)
+
+        path = built("tile", "tile_factory.bin")
         if not os.path.exists(path):
-            self.skipTest("build/tile/tile.bin is not built")
-        self.assertGreater(len(flash_tile.load_image(path)), 1000)
-        hub = os.path.join(here, "..", "build", "hub", "hub.bin")
-        if os.path.exists(hub):
-            with self.assertRaises(flash_tile.Failure):
-                flash_tile.load_image(hub)
+            self.skipTest("build/tile/tile_factory.bin is not built (`make tile`)")
+        image = flash_tile.load_image(path)
+        self.assertEqual(len(image), mkimage.FACTORY_LEN)
+        self.assertEqual(flash_tile.factory_program(image).kind, 0)
+        # the longest quiet there is covers the flashing, and with room
+        self.assertLess(flash_tile.flash_time(image, 115200), 35)
+        for other in (("hub", "hub_factory.bin"), ("hub", "hub_a.img"), ("tile", "tile_a.img"),
+                      ("tile", "tile_b.img"), ("tile", "tile_a.bin")):
+            if os.path.exists(built(*other)):
+                with self.assertRaises(flash_tile.Failure, msg=other):
+                    flash_tile.load_image(built(*other))
 
     def test_find_hub(self):
         with tempfile.TemporaryDirectory() as top:

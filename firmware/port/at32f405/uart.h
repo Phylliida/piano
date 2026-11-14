@@ -9,9 +9,10 @@
 
 #include "port.h"
 
-/* 20 ms of a cable carrying bytes back to back at 1 Mbaud is 2000 bytes:
- * that is how long a flash erase can keep the program from looking. */
-#define UART_RX_LEN  4096
+/* The longest the program does not look is the start of a firmware update:
+ * two flash sectors erased one after the other, 36 ms. A cable carrying
+ * bytes back to back at 1 Mbaud brings 3600 bytes in that time. */
+#define UART_RX_LEN  8192
 #define UART_TX_LEN  128        /* one frame; the bridge sends at most this at a time */
 
 /* Which UART, which pins, which DMA channels. */

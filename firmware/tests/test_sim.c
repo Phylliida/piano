@@ -315,7 +315,7 @@ static int lines_with(const char *head)
 static const char *say(const char *f, ...) __attribute__((format(printf, 1, 2)));
 static const char *say(const char *f, ...)
 {
-    char line[128];
+    char line[HUB_LINE_MAX + 1];
     va_list ap;
 
     va_start(ap, f);
@@ -1363,7 +1363,6 @@ static void bootloader_and_bridge(void)
      * among themselves and the hub says nothing. */
     sim_run(&s, 1500);
     CHECK(frames_sent() > before);
-    CHECK_EQ(s.cable[hubcab].sent[0], s.cable[hubcab].sent[0]);
     unsigned hub_sent = s.cable[hubcab].sent[0];
     CHECK_EQ(T(2)->node.parent, PORT_NONE);
     sim_type(&s, "tiles\r");            /* goes to the UART now, not the console */
@@ -1557,6 +1556,828 @@ static void clocks_wrap(void)
     CHECK_EQ(midi_sounding(), 0);
 }
 
+/* ------------------------------------------------------------ new programs --- */
+
+#define PROG_LEN  4400u                 /* three sectors, and the last write a short one */
+#define V_NEW     0x0102
+
+static uint8_t prog[PROG_LEN];
+
+/* A program for one of the simulator's chips: see flashsim.h. Returns its
+ * checksum, which is how the hub names an image. */
+static uint32_t make_program(uint8_t kind, uint8_t slot, uint16_t version, uint8_t act, uint32_t seed)
+{
+    flashsim_image(prog, PROG_LEN, kind, slot, version, act, seed);
+    return get32(prog + PROG_LEN - 4);
+}
+
+/* The checksum of the whole image in a node's slot; 0: there is none. */
+static uint32_t slot_crc(const sim_node_t *n, uint8_t slot)
+{
+    fw_image_t image;
+
+    return fw_image_check(n->chip.mem, slot, &image) ? image.crc : 0;
+}
+
+/* A tile's number in the hub's table, as the console prints it. */
+static int hix(int i)
+{
+    return HT(i) ? (int)(HT(i) - H()->tile) : -1;
+}
+
+/* Tiles in the hub's table. */
+static int hub_tiles(void)
+{
+    int n = 0;
+
+    for (int i = 0; i < HUB_MAX_TILES; i++)
+        n += H()->tile[i].used;
+    return n;
+}
+
+/* A tile's ID as the console takes it. */
+static const char *id_of(int i)
+{
+    static char text[4][9];
+    static int turn;
+    char *t = text[turn++ % 4];
+
+    snprintf(t, sizeof text[0], "%08x", (unsigned)T(i)->node.id);
+    return t;
+}
+
+/* `count` bytes of prog[] from `at` on, as a `fw ... write` line. */
+static const char *write_line(const char *who, uint32_t at, uint32_t count)
+{
+    static char line[HUB_LINE_MAX + 1];
+    size_t n = (size_t)snprintf(line, sizeof line, "fw %s write %u ", who, (unsigned)at);
+
+    for (uint32_t i = 0; i < count; i++, n += 2)
+        snprintf(line + n, sizeof line - n, "%02x", prog[at + i]);
+    return line;
+}
+
+static void say_write(const char *who, uint32_t at, uint32_t count)
+{
+    say("%s", write_line(who, at, count));
+}
+
+/* prog[] from `from` up to `to` goes to a node (a tile's ID, or "hub").
+ * False: the node refused a piece, and what it said is in the text. */
+static bool send_pieces(const char *who, uint32_t from, uint32_t to)
+{
+    for (uint32_t at = from; at < to; ) {
+        uint32_t count = to - at < FW_CHUNK ? to - at : FW_CHUNK;
+
+        say_write(who, at, count);
+        if (!has_line("ok"))
+            return false;
+        at += count;
+    }
+    return true;
+}
+
+/* What tools/update.py does with one node: all of prog[]. */
+static bool send_program(const char *who)
+{
+    say("fw %s begin %u", who, (unsigned)PROG_LEN);
+    if (!has_line("ok") || !send_pieces(who, 0, PROG_LEN))
+        return false;
+    say("fw %s commit", who);
+    return has_line("ok");
+}
+
+/* Type a command and run until the node is in the middle of a flash
+ * operation: the shortest takes one step. False: it never was. */
+static bool until_flashing(const sim_node_t *n, const char *f, ...) __attribute__((format(printf, 2, 3)));
+static bool until_flashing(const sim_node_t *n, const char *f, ...)
+{
+    char line[160];
+    va_list ap;
+
+    va_start(ap, f);
+    vsnprintf(line, sizeof line, f, ap);
+    va_end(ap);
+    s.ntext = 0;
+    s.text[0] = 0;
+    sim_type(&s, line);
+    sim_type(&s, "\r");
+    for (int steps = 0; steps < 200 * SIM_STEPS_PER_MS && !n->flashing; steps++)
+        sim_step(&s);
+    return n->flashing;
+}
+
+/* The power of the whole keyboard goes and comes back. */
+static void power_cycle(void)
+{
+    for (int i = SIM_HUB; i < s.ntiles; i++)
+        sim_power(&s, i, false);
+    sim_run(&s, 300);
+    for (int i = SIM_HUB; i < s.ntiles; i++)
+        sim_power(&s, i, true);
+    sim_run(&s, 4000);
+}
+
+/* New programs for every tile and for the hub, through the hub's console,
+ * the way tools/update.py does it: into the slot that is not running, a
+ * restart into it on trial, and a confirm that makes it stay. Then the
+ * same again, which goes back into the first slot. */
+static void firmware_update(void)
+{
+    uint32_t was[5], crc[5];
+
+    start(171);
+    grid(2, 2, 0x06);
+    sim_run(&s, 3500);
+    check_settled();
+
+    /* as built: the first slot, and nothing ever sent */
+    SAY_OK("fw all");
+    for (int i = 0; i < 4; i++) {
+        was[i] = slot_crc(&s.tile[i].n, FW_SLOT_A);
+        CHECK(was[i] != 0);
+        CHECK(has_linef("tile %d: runs a none 0001 %08x, other none -", hix(i), (unsigned)was[i]));
+    }
+    SAY_OK("fw hub");
+    was[4] = slot_crc(&s.hub.n, FW_SLOT_A);
+    CHECK(has_linef("hub: runs a none 0001 %08x, other none -", (unsigned)was[4]));
+
+    for (int round = 0; round < 2; round++) {
+        uint8_t to = round ? FW_SLOT_A : FW_SLOT_B;
+        char from_letter = round ? 'b' : 'a', to_letter = round ? 'a' : 'b';
+        const char *from_state = round ? "good" : "none";
+        uint16_t version = (uint16_t)(V_NEW + round), old = round ? V_NEW : FW_VERSION;
+        unsigned boots = (unsigned)round;
+
+        /* a key is held all the while, and others are played */
+        int held = pitch(3, 30);
+        midi_clear();
+        tap_clear();
+        press(3, 30, 20);
+        sim_run(&s, 100);
+
+        for (int i = 0; i < 4; i++) {
+            crc[i] = make_program(KIND_TILE, to, version, SIM_ACT_RUN, 1710u + 10u * (unsigned)round + (unsigned)i);
+            CHECK(send_program(id_of(i)));
+            SAY_OK("fw %s", id_of(i));
+            CHECK(has_linef("tile %d: runs %c %s %04x %08x, other new %08x, staged", hix(i), from_letter,
+                            from_state, old, (unsigned)was[i], (unsigned)crc[i]));
+            press(i, 7, 10);
+            sim_run(&s, 60);
+            lift(i, 7, 10);
+            sim_run(&s, 60);
+        }
+        crc[4] = make_program(KIND_HUB, to, version, SIM_ACT_RUN, 1719u + 10u * (unsigned)round);
+        CHECK(send_program("hub"));
+        SAY_OK("fw hub");
+        CHECK(has_linef("hub: runs %c %s %04x %08x, other new %08x, staged", from_letter, from_state, old,
+                        (unsigned)was[4], (unsigned)crc[4]));
+
+        /* Nobody stopped being a keyboard for it. */
+        check_settled();
+        CHECK_EQ(midi_count(0x90, held), 1);
+        CHECK_EQ(midi_count(0x80, held), 0);
+        CHECK_EQ(midi_count(0x90, -1), 5);
+        CHECK_EQ(midi_sounding(), 1);
+        CHECK_EQ(H()->stats.silent, 0);
+        CHECK_EQ(H()->stats.notes_lost, 0);
+        CHECK_EQ(tap.dups, 0);
+        for (int i = 0; i < 4; i++) {
+            CHECK_EQ(s.tile[i].n.reboots, boots);
+            CHECK_EQ(s.tile[i].n.rx_overruns, 0);
+            CHECK_EQ(s.tile[i].n.chip.stray, 0);
+            CHECK_EQ(s.tile[i].n.chip.rewrites, 0);
+        }
+        CHECK_EQ(s.hub.n.reboots, boots);
+        lift(3, 30, 20);
+        sim_run(&s, 1100);              /* and every tile's INFO has come round */
+        CHECK_EQ(midi_sounding(), 0);
+        SAY_OK("tiles");
+        CHECK_EQ(lines_with("tile"), 0);
+        CHECK(strstr(s.text, " trial") == NULL);
+        for (int i = 0; i < 4; i++)
+            CHECK(HT(i)->flags & INFO_STAGED);
+
+        /* Everything starts again, into the new programs, on trial. */
+        SAY_OK("reboot all");
+        SAY_OK("reboot hub");
+        sim_run(&s, 4000);
+        check_settled();
+        for (int i = SIM_HUB; i < 4; i++) {
+            const sim_node_t *n = i == SIM_HUB ? &s.hub.n : &s.tile[i].n;
+            CHECK_EQ(n->reboots, boots + 1);
+            CHECK_EQ(n->slot, to);
+            CHECK(n->trial);
+        }
+        SAY_OK("fw all");
+        for (int i = 0; i < 4; i++) {
+            CHECK(has_linef("tile %d: runs %c tried %04x %08x, other %s %08x", hix(i), to_letter, version,
+                            (unsigned)crc[i], from_state, (unsigned)was[i]));
+            CHECK(HT(i)->flags & INFO_TRIAL);
+            CHECK(!(HT(i)->flags & INFO_STAGED));
+            CHECK_EQ(!!(HT(i)->flags & INFO_SLOT_B), to == FW_SLOT_B);
+        }
+        SAY_OK("fw hub");
+        CHECK(has_linef("hub: runs %c tried %04x %08x, other %s %08x", to_letter, version, (unsigned)crc[4],
+                        from_state, (unsigned)was[4]));
+
+        /* A program on trial plays, and takes no newer one. */
+        midi_clear();
+        press(0, 3, 20);
+        sim_run(&s, 100);
+        lift(0, 3, 20);
+        sim_run(&s, 100);
+        CHECK_EQ(midi_count(0x90, pitch(0, 3)), 1);
+        CHECK_EQ(midi_sounding(), 0);
+        say("fw %s begin %u", id_of(1), (unsigned)PROG_LEN);
+        CHECK(has_linef("tile %d: busy", hix(1)));
+        say("fw hub begin %u", (unsigned)PROG_LEN);
+        CHECK(has_line("hub: busy"));
+
+        SAY_OK("fw all confirm");
+        SAY_OK("fw hub confirm");
+        SAY_OK("fw all");
+        for (int i = 0; i < 4; i++)
+            CHECK(has_linef("tile %d: runs %c good %04x %08x, other %s %08x", hix(i), to_letter, version,
+                            (unsigned)crc[i], from_state, (unsigned)was[i]));
+        SAY_OK("fw hub");
+        CHECK(has_linef("hub: runs %c good %04x %08x, other %s %08x", to_letter, version, (unsigned)crc[4],
+                        from_state, (unsigned)was[4]));
+
+        /* They stay: past the end of the trial, and with the power off and on. */
+        sim_run(&s, FW_TRIAL_MS + 2000);
+        check_settled();
+        power_cycle();
+        check_settled();
+        for (int i = SIM_HUB; i < 4; i++) {
+            const sim_node_t *n = i == SIM_HUB ? &s.hub.n : &s.tile[i].n;
+            CHECK_EQ(n->reboots, boots + 1);
+            CHECK_EQ(n->wdt_resets, 0);
+            CHECK_EQ(n->slot, to);
+            CHECK(!n->trial);
+        }
+        for (int i = 0; i < 4; i++) {
+            CHECK(!(HT(i)->flags & (INFO_TRIAL | INFO_STAGED)));
+            was[i] = crc[i];
+        }
+        was[4] = crc[4];
+    }
+}
+
+/* New programs that are no good, and good ones nobody confirms: each node
+ * goes back to the program it had. */
+static void firmware_goes_back(void)
+{
+    uint32_t was[4], crc[4];
+
+    start(181);
+    grid(3, 1, 0x05);
+    sim_run(&s, 3500);
+    check_settled();
+    for (int i = 0; i < 3; i++)
+        was[i] = slot_crc(&s.tile[i].n, FW_SLOT_A);
+    was[3] = slot_crc(&s.hub.n, FW_SLOT_A);
+
+    /* The far tile gets a program that hangs, the middle one a program
+     * that hears nothing, the one at the hub a good one. */
+    crc[0] = make_program(KIND_TILE, FW_SLOT_B, V_NEW, SIM_ACT_HANG, 1810);
+    CHECK(send_program(id_of(0)));
+    crc[1] = make_program(KIND_TILE, FW_SLOT_B, V_NEW, SIM_ACT_DEAF, 1811);
+    CHECK(send_program(id_of(1)));
+    crc[2] = make_program(KIND_TILE, FW_SLOT_B, V_NEW, SIM_ACT_RUN, 1812);
+    CHECK(send_program(id_of(2)));
+    SAY_OK("reboot all");
+    sim_run(&s, 2000);
+    CHECK_EQ(s.tile[0].n.act, SIM_ACT_HANG);
+    CHECK_EQ(s.tile[1].n.act, SIM_ACT_DEAF);
+    for (int i = 0; i < 3; i++) {
+        CHECK_EQ(s.tile[i].n.slot, FW_SLOT_B);
+        CHECK(s.tile[i].n.trial);
+    }
+
+    /* The watchdog ends the one that hangs. It has its old program again,
+     * and nobody to tell: the tile between it and the hub hears nothing. */
+    sim_run(&s, 4000);
+    CHECK_EQ(s.tile[0].n.wdt_resets, 1);
+    CHECK_EQ(s.tile[0].n.slot, FW_SLOT_A);
+    CHECK(!s.tile[0].n.trial);
+    CHECK_EQ(s.tile[0].n.act, SIM_ACT_RUN);
+    CHECK_EQ(T(0)->node.parent, PORT_NONE);
+    SAY_OK("tiles");
+    CHECK(has_line("1 tile"));
+    SAY_OK("fw all confirm");           /* only the tile at the hub hears that */
+    CHECK_EQ(s.tile[1].n.reboots, 1);
+
+    /* The deaf one gives up when its trial is over. */
+    sim_run(&s, FW_TRIAL_MS);
+    CHECK_EQ(s.tile[1].n.reboots, 2);
+    CHECK_EQ(s.tile[1].n.slot, FW_SLOT_A);
+    sim_run(&s, 4000);
+    check_settled();
+    SAY_OK("fw all");
+    CHECK(has_linef("tile %d: runs a none 0001 %08x, other tried %08x", hix(0), (unsigned)was[0], (unsigned)crc[0]));
+    CHECK(has_linef("tile %d: runs a none 0001 %08x, other tried %08x", hix(1), (unsigned)was[1], (unsigned)crc[1]));
+    CHECK(has_linef("tile %d: runs b good 0102 %08x, other none %08x", hix(2), (unsigned)crc[2], (unsigned)was[2]));
+    CHECK_EQ(s.tile[2].n.reboots, 1);
+    CHECK_EQ(s.tile[0].n.reboots, 1);
+    midi_clear();
+    for (int i = 0; i < 3; i++) {
+        press(i, 11, 20);
+        sim_run(&s, 100);
+        lift(i, 11, 20);
+        sim_run(&s, 100);
+    }
+    CHECK_EQ(midi_count(0x90, -1), 3);
+    CHECK_EQ(midi_sounding(), 0);
+
+    /* Good programs, and then the computer goes away before it confirms
+     * them: a minute later every tile has its old one again. */
+    for (int i = 0; i < 2; i++) {
+        crc[i] = make_program(KIND_TILE, FW_SLOT_B, V_NEW, SIM_ACT_RUN, 1820u + (unsigned)i);
+        CHECK(send_program(id_of(i)));
+    }
+    SAY_OK("reboot %s", id_of(0));
+    SAY_OK("reboot %s", id_of(1));
+    sim_run(&s, 3000);
+    check_settled();
+    CHECK(s.tile[0].n.trial && s.tile[1].n.trial);
+    SAY_OK("tiles");
+    CHECK(strstr(s.text, " trial") != NULL);
+    sim_run(&s, FW_TRIAL_MS + 3000);
+    check_settled();
+    for (int i = 0; i < 2; i++) {
+        CHECK_EQ(s.tile[i].n.reboots, i == 0 ? 3 : 4);
+        CHECK_EQ(s.tile[i].n.slot, FW_SLOT_A);
+        CHECK(!s.tile[i].n.trial);
+    }
+    SAY_OK("fw %s", id_of(0));
+    CHECK(has_linef("tile %d: runs a none 0001 %08x, other tried %08x", hix(0), (unsigned)was[0], (unsigned)crc[0]));
+
+    /* After all that a tile still takes a program and keeps it. */
+    crc[0] = make_program(KIND_TILE, FW_SLOT_B, V_NEW + 1, SIM_ACT_RUN, 1830);
+    CHECK(send_program(id_of(0)));
+    SAY_OK("reboot %s", id_of(0));
+    sim_run(&s, 3000);
+    SAY_OK("fw %s confirm", id_of(0));
+    sim_run(&s, FW_TRIAL_MS + 3000);
+    check_settled();
+    SAY_OK("fw %s", id_of(0));
+    CHECK(has_linef("tile %d: runs b good 0103 %08x, other none %08x", hix(0), (unsigned)crc[0], (unsigned)was[0]));
+
+    /* The hub. A program that hangs: the watchdog, and the old one. */
+    crc[3] = make_program(KIND_HUB, FW_SLOT_B, V_NEW, SIM_ACT_HANG, 1840);
+    CHECK(send_program("hub"));
+    SAY_OK("reboot hub");
+    sim_run(&s, 1000);
+    CHECK_EQ(s.hub.n.act, SIM_ACT_HANG);
+    CHECK(s.hub.n.trial);
+    sim_run(&s, 8000);
+    CHECK_EQ(s.hub.n.wdt_resets, 1);
+    CHECK_EQ(s.hub.n.slot, FW_SLOT_A);
+    check_settled();
+    SAY_OK("fw hub");
+    CHECK(has_linef("hub: runs a none 0001 %08x, other tried %08x", (unsigned)was[3], (unsigned)crc[3]));
+
+    /* One that hears neither the cable nor the computer. */
+    crc[3] = make_program(KIND_HUB, FW_SLOT_B, V_NEW, SIM_ACT_DEAF, 1841);
+    CHECK(send_program("hub"));
+    SAY_OK("reboot hub");
+    sim_run(&s, 3000);
+    CHECK_EQ(s.hub.n.act, SIM_ACT_DEAF);
+    CHECK_EQ(hub_tiles(), 0);
+    s.ntext = 0;
+    s.text[0] = 0;
+    sim_type(&s, "fw hub confirm\r");
+    sim_run(&s, 500);
+    CHECK(!has_line("ok"));
+    sim_run(&s, FW_TRIAL_MS);
+    CHECK_EQ(s.hub.n.slot, FW_SLOT_A);
+    CHECK_EQ(s.hub.n.act, SIM_ACT_RUN);
+    sim_run(&s, 3000);
+    check_settled();
+
+    /* A good one, never confirmed. */
+    crc[3] = make_program(KIND_HUB, FW_SLOT_B, V_NEW, SIM_ACT_RUN, 1842);
+    CHECK(send_program("hub"));
+    SAY_OK("reboot hub");
+    sim_run(&s, 3000);
+    check_settled();
+    SAY_OK("fw hub");
+    CHECK(has_linef("hub: runs b tried 0102 %08x, other none %08x", (unsigned)crc[3], (unsigned)was[3]));
+    unsigned boots = s.hub.n.reboots;
+    sim_run(&s, FW_TRIAL_MS + 3000);
+    CHECK_EQ(s.hub.n.reboots, boots + 1);
+    check_settled();
+    SAY_OK("fw hub");
+    CHECK(has_linef("hub: runs a none 0001 %08x, other tried %08x", (unsigned)was[3], (unsigned)crc[3]));
+
+    /* And one that is. */
+    crc[3] = make_program(KIND_HUB, FW_SLOT_B, V_NEW + 1, SIM_ACT_RUN, 1843);
+    CHECK(send_program("hub"));
+    SAY_OK("reboot hub");
+    sim_run(&s, 3000);
+    SAY_OK("fw hub confirm");
+    sim_run(&s, FW_TRIAL_MS + 3000);
+    CHECK_EQ(s.hub.n.reboots, boots + 2);
+    check_settled();
+    SAY_OK("fw hub");
+    CHECK(has_linef("hub: runs b good 0103 %08x, other none %08x", (unsigned)crc[3], (unsigned)was[3]));
+    for (int i = SIM_HUB; i < 3; i++) {
+        const sim_node_t *n = i == SIM_HUB ? &s.hub.n : &s.tile[i].n;
+        CHECK_EQ(n->no_program, 0);
+        CHECK_EQ(n->chip.stray, 0);
+        CHECK_EQ(n->chip.rewrites, 0);
+    }
+}
+
+/* The power goes in the middle of an update: the node starts with the
+ * program it had, and takes the new one when it is sent again. */
+static void firmware_power_cut(void)
+{
+    uint32_t was[3], crc;
+
+    start(191);
+    grid(2, 1, 0x01);
+    sim_run(&s, 3500);
+    check_settled();
+    for (int i = 0; i < 2; i++)
+        was[i] = slot_crc(&s.tile[i].n, FW_SLOT_A);
+    was[2] = slot_crc(&s.hub.n, FW_SLOT_A);
+
+    /* while the tile erases for a new program */
+    crc = make_program(KIND_TILE, FW_SLOT_B, V_NEW, SIM_ACT_RUN, 1910);
+    CHECK(until_flashing(&s.tile[0].n, "fw %s begin %u", id_of(0), (unsigned)PROG_LEN));
+    sim_power(&s, 0, false);
+    for (int ms = 0; ms < 2000 && !has_error(); ms++)
+        sim_run(&s, 1);
+    CHECK(has_line("error: 1 failed"));
+    sim_power(&s, 0, true);
+    sim_run(&s, 3000);
+    check_settled();
+    CHECK_EQ(s.tile[0].n.slot, FW_SLOT_A);
+    CHECK(!s.tile[0].n.trial);
+
+    /* in the middle of the image */
+    SAY_OK("fw %s begin %u", id_of(0), (unsigned)PROG_LEN);
+    CHECK(send_pieces(id_of(0), 0, 2400));
+    CHECK(until_flashing(&s.tile[0].n, "%s", write_line(id_of(0), 2400, FW_CHUNK)));
+    sim_power(&s, 0, false);
+    sim_run(&s, 1000);
+    sim_power(&s, 0, true);
+    sim_run(&s, 3000);
+    check_settled();
+    CHECK_EQ(s.tile[0].n.slot, FW_SLOT_A);
+    SAY_OK("fw %s", id_of(0));
+    CHECK(has_linef("tile %d: runs a none 0001 %08x, other partial -", hix(0), (unsigned)was[0]));
+    /* the tile does not go on where it was: it knows nothing of it */
+    say_write(id_of(0), 2400, FW_CHUNK);
+    CHECK(has_linef("tile %d: failed, at 0", hix(0)));
+    say("fw %s commit", id_of(0));
+    CHECK(has_linef("tile %d: failed, at 0", hix(0)));
+
+    /* in the last word of all: the one that says the image is whole */
+    SAY_OK("fw %s begin %u", id_of(0), (unsigned)PROG_LEN);
+    CHECK(send_pieces(id_of(0), 0, PROG_LEN));
+    CHECK(until_flashing(&s.tile[0].n, "fw %s commit", id_of(0)));
+    sim_power(&s, 0, false);
+    sim_run(&s, 1000);
+    sim_power(&s, 0, true);
+    sim_run(&s, 3000);
+    check_settled();
+    CHECK_EQ(s.tile[0].n.slot, FW_SLOT_A);
+    CHECK(!s.tile[0].n.trial);
+    SAY_OK("fw %s", id_of(0));
+    CHECK(has_linef("tile %d: runs a none 0001 %08x, other partial %08x", hix(0), (unsigned)was[0], (unsigned)crc));
+
+    /* The hub goes (its plug was pulled) with a tile half way. The tile
+     * waits; whoever comes back can go on from where it says it is. */
+    SAY_OK("fw %s begin %u", id_of(1), (unsigned)PROG_LEN);
+    CHECK(send_pieces(id_of(1), 0, 1440));
+    sim_power(&s, SIM_HUB, false);
+    sim_run(&s, 2000);
+    sim_power(&s, SIM_HUB, true);
+    sim_run(&s, 4000);
+    check_settled();
+    SAY_OK("fw %s", id_of(1));
+    CHECK(has_linef("tile %d: runs a none 0001 %08x, other partial -, receiving at 1440", hix(1), (unsigned)was[1]));
+    say_write(id_of(1), 0, FW_CHUNK);
+    CHECK(has_linef("tile %d: value not allowed, at 1440", hix(1)));
+    CHECK(send_pieces(id_of(1), 1440, PROG_LEN));
+    SAY_OK("fw %s commit", id_of(1));
+
+    /* The power goes before anybody said `reboot`: the new program starts
+     * all the same, on trial. It goes again before anybody confirmed: the
+     * trial is over, the old program is back. */
+    power_cycle();
+    check_settled();
+    CHECK_EQ(s.tile[1].n.slot, FW_SLOT_B);
+    CHECK(s.tile[1].n.trial);
+    CHECK_EQ(s.tile[0].n.slot, FW_SLOT_A);
+    power_cycle();
+    check_settled();
+    CHECK_EQ(s.tile[1].n.slot, FW_SLOT_A);
+    CHECK(!s.tile[1].n.trial);
+    SAY_OK("fw %s", id_of(1));
+    CHECK(has_linef("tile %d: runs a none 0001 %08x, other tried %08x", hix(1), (unsigned)was[1], (unsigned)crc));
+
+    /* The hub's own, in the middle of the image. */
+    crc = make_program(KIND_HUB, FW_SLOT_B, V_NEW, SIM_ACT_RUN, 1920);
+    SAY_OK("fw hub begin %u", (unsigned)PROG_LEN);
+    CHECK(send_pieces("hub", 0, 3360));
+    CHECK(until_flashing(&s.hub.n, "%s", write_line("hub", 3360, FW_CHUNK)));
+    sim_power(&s, SIM_HUB, false);
+    sim_run(&s, 500);
+    sim_power(&s, SIM_HUB, true);
+    sim_run(&s, 4000);
+    check_settled();
+    CHECK_EQ(s.hub.n.slot, FW_SLOT_A);
+    SAY_OK("fw hub");
+    CHECK(has_linef("hub: runs a none 0001 %08x, other partial -", (unsigned)was[2]));
+
+    /* Sent again from the start, each of them takes it. */
+    CHECK(send_program("hub"));
+    make_program(KIND_TILE, FW_SLOT_B, V_NEW, SIM_ACT_RUN, 1910);
+    CHECK(send_program(id_of(0)));
+    CHECK(send_program(id_of(1)));
+    SAY_OK("reboot all");
+    SAY_OK("reboot hub");
+    sim_run(&s, 4000);
+    check_settled();
+    SAY_OK("fw all confirm");
+    SAY_OK("fw hub confirm");
+    power_cycle();
+    check_settled();
+    for (int i = SIM_HUB; i < 2; i++) {
+        const sim_node_t *n = i == SIM_HUB ? &s.hub.n : &s.tile[i].n;
+        CHECK_EQ(n->slot, FW_SLOT_B);
+        CHECK(!n->trial);
+        CHECK_EQ(n->no_program, 0);
+        CHECK_EQ(n->chip.stray, 0);
+    }
+    SAY_OK("fw hub");
+    CHECK(has_linef("hub: runs b good 0102 %08x, other none %08x", (unsigned)crc, (unsigned)was[2]));
+}
+
+/* Programs a node must not start: somebody else's, one built for the slot
+ * it would overwrite itself in, one that was damaged on the way. */
+static void firmware_refused(void)
+{
+    start(201);
+    grid(2, 1, 0x02);
+    sim_run(&s, 3500);
+    check_settled();
+    uint32_t was = slot_crc(&s.tile[0].n, FW_SLOT_A);
+
+    /* a hub's program for a tile, and a tile's for the hub */
+    uint32_t crc = make_program(KIND_HUB, FW_SLOT_B, V_NEW, SIM_ACT_RUN, 2010);
+    CHECK(!send_program(id_of(0)));
+    CHECK(has_linef("tile %d: failed, at 0", hix(0)));
+    CHECK(has_line("error: 1 failed"));
+    SAY_OK("fw %s", id_of(0));
+    CHECK(has_linef("tile %d: runs a none 0001 %08x, other partial %08x", hix(0), (unsigned)was, (unsigned)crc));
+    make_program(KIND_TILE, FW_SLOT_B, V_NEW, SIM_ACT_RUN, 2011);
+    CHECK(!send_program("hub"));
+    CHECK(has_line("hub: failed, at 0"));
+
+    /* built for the first slot, which is where the node runs */
+    make_program(KIND_TILE, FW_SLOT_A, V_NEW, SIM_ACT_RUN, 2012);
+    CHECK(!send_program(id_of(1)));
+    CHECK(has_linef("tile %d: failed, at 0", hix(1)));
+    make_program(KIND_HUB, FW_SLOT_A, V_NEW, SIM_ACT_RUN, 2013);
+    CHECK(!send_program("hub"));
+    CHECK(has_line("hub: failed, at 0"));
+
+    /* one bit wrong */
+    make_program(KIND_TILE, FW_SLOT_B, V_NEW, SIM_ACT_RUN, 2014);
+    prog[3000] ^= 0x10;
+    CHECK(!send_program(id_of(1)));
+    CHECK(has_linef("tile %d: failed, at 0", hix(1)));
+    SAY_OK("fw %s", id_of(1));
+    CHECK(has_linef("tile %d: runs a none 0001 %08x, other partial -", hix(1),
+                    (unsigned)slot_crc(&s.tile[1].n, FW_SLOT_A)));
+
+    /* not all of it; a piece twice; a piece left out */
+    make_program(KIND_TILE, FW_SLOT_B, V_NEW, SIM_ACT_RUN, 2015);
+    SAY_OK("fw %s begin %u", id_of(0), (unsigned)PROG_LEN);
+    CHECK(send_pieces(id_of(0), 0, 960));
+    say("fw %s commit", id_of(0));
+    CHECK(has_linef("tile %d: value not allowed, at 960", hix(0)));
+    say_write(id_of(0), 912, FW_CHUNK);
+    CHECK(has_linef("tile %d: value not allowed, at 960", hix(0)));
+    say_write(id_of(0), 1008, FW_CHUNK);
+    CHECK(has_linef("tile %d: value not allowed, at 960", hix(0)));
+    CHECK(send_pieces(id_of(0), 960, PROG_LEN));
+    say("fw %s write %u 00000000", id_of(0), (unsigned)PROG_LEN);       /* past the end */
+    CHECK(has_linef("tile %d: value not allowed, at %u", hix(0), (unsigned)PROG_LEN));
+    SAY_OK("fw %s commit", id_of(0));
+
+    /* None of the refused ones is ever started. */
+    SAY_OK("reboot all");
+    SAY_OK("reboot hub");
+    sim_run(&s, 4000);
+    check_settled();
+    CHECK_EQ(s.tile[0].n.slot, FW_SLOT_B);
+    CHECK(s.tile[0].n.trial);
+    CHECK_EQ(s.tile[1].n.slot, FW_SLOT_A);
+    CHECK(!s.tile[1].n.trial);
+    CHECK_EQ(s.hub.n.slot, FW_SLOT_A);
+    CHECK(!s.hub.n.trial);
+    power_cycle();
+    power_cycle();
+    check_settled();
+    for (int i = SIM_HUB; i < 2; i++) {
+        const sim_node_t *n = i == SIM_HUB ? &s.hub.n : &s.tile[i].n;
+        CHECK_EQ(n->slot, FW_SLOT_A);
+        CHECK(!n->trial);
+        CHECK_EQ(n->no_program, 0);
+    }
+}
+
+/* Type `reboot hub` and run until the hub's chip has reset. */
+static void hub_reset(void)
+{
+    unsigned boots = s.hub.n.reboots;
+
+    SAY_OK("reboot hub");
+    for (int ms = 0; ms < 1000 && s.hub.n.reboots == boots; ms++)
+        sim_run(&s, 1);
+    CHECK_EQ(s.hub.n.reboots, boots + 1);
+}
+
+static bool tiles_dark(void)
+{
+    for (int i = 0; i < s.ntiles; i++) {
+        if (s.tile[i].n.powered || s.tile[i].n.boot_at)
+            return false;
+    }
+    return true;
+}
+
+/* The tiles have their power through the hub, as on the real boards, and
+ * the hub's switches are off whenever its chip starts: every restart of the
+ * hub is a power cut for every tile. What that makes of an update. */
+static void power_through_the_hub(void)
+{
+    uint32_t was[3], crc[3];
+
+    start(211);
+    s.hub_feeds = true;
+    grid(2, 1, 0x02);
+
+    /* Nobody has power before the hub's program switches it on. */
+    CHECK(tiles_dark());
+    sim_run(&s, SIM_FEED_MS - 10);
+    CHECK(tiles_dark());
+    sim_run(&s, 10 + SIM_BOOT_MS + 1);
+    CHECK(alive(0) && alive(1));
+    sim_run(&s, 3500);
+    check_settled();
+    for (int i = 0; i < 2; i++)
+        was[i] = slot_crc(&s.tile[i].n, FW_SLOT_A);
+    was[2] = slot_crc(&s.hub.n, FW_SLOT_A);
+
+    /* The hub restarts on command: the tiles are off with it and start
+     * afresh. That is no restart of their own. */
+    hub_reset();
+    sim_run(&s, 1);
+    CHECK(tiles_dark());
+    sim_run(&s, SIM_BOOT_MS + SIM_FEED_MS - 10);
+    CHECK(s.hub.n.powered);
+    CHECK(tiles_dark());
+    sim_run(&s, 4000);
+    check_settled();
+    CHECK_EQ(s.tile[0].n.reboots, 0);
+    CHECK_EQ(s.tile[1].n.reboots, 0);
+
+    /* A tile that was half way through a new program knows nothing of it
+     * afterwards. (With power of its own it would: firmware_power_cut.) */
+    make_program(KIND_TILE, FW_SLOT_B, V_NEW, SIM_ACT_RUN, 2110);
+    SAY_OK("fw %s begin %u", id_of(1), (unsigned)PROG_LEN);
+    CHECK(send_pieces(id_of(1), 0, 1440));
+    hub_reset();
+    sim_run(&s, 4000);
+    check_settled();
+    SAY_OK("fw %s", id_of(1));
+    CHECK(has_linef("tile %d: runs a none 0001 %08x, other partial -", hix(1), (unsigned)was[1]));
+    say_write(id_of(1), 1440, FW_CHUNK);
+    CHECK(has_linef("tile %d: failed, at 0", hix(1)));
+
+    /* Both tiles get a program. One is told to restart and runs it on
+     * trial; the other has it waiting. Then the hub restarts. For the first
+     * the trial is over: it is back in its old program. The second starts
+     * its new one. So tools/update.py restarts the hub first, and tells a
+     * tile to restart only after. */
+    for (int i = 0; i < 2; i++) {
+        crc[i] = make_program(KIND_TILE, FW_SLOT_B, V_NEW, SIM_ACT_RUN, 2111u + (unsigned)i);
+        CHECK(send_program(id_of(i)));
+    }
+    SAY_OK("reboot %s", id_of(1));
+    sim_run(&s, 3000);
+    check_settled();
+    CHECK_EQ(s.tile[1].n.slot, FW_SLOT_B);
+    CHECK(s.tile[1].n.trial);
+    CHECK_EQ(s.tile[0].n.slot, FW_SLOT_A);
+    hub_reset();
+    sim_run(&s, 4000);
+    check_settled();
+    CHECK_EQ(s.tile[1].n.slot, FW_SLOT_A);
+    CHECK(!s.tile[1].n.trial);
+    CHECK_EQ(s.tile[0].n.slot, FW_SLOT_B);
+    CHECK(s.tile[0].n.trial);
+    SAY_OK("fw all");
+    CHECK(has_linef("tile %d: runs b tried 0102 %08x, other none %08x", hix(0), (unsigned)crc[0], (unsigned)was[0]));
+    CHECK(has_linef("tile %d: runs a none 0001 %08x, other tried %08x", hix(1), (unsigned)was[1], (unsigned)crc[1]));
+
+    /* Confirmed, it stays through the hub's next restart. */
+    SAY_OK("fw %s confirm", id_of(0));
+    hub_reset();
+    sim_run(&s, 4000);
+    check_settled();
+    SAY_OK("fw all");
+    CHECK(has_linef("tile %d: runs b good 0102 %08x, other none %08x", hix(0), (unsigned)crc[0], (unsigned)was[0]));
+    CHECK(has_linef("tile %d: runs a none 0001 %08x, other tried %08x", hix(1), (unsigned)was[1], (unsigned)crc[1]));
+
+    /* A new program for the hub that hangs: no tile has power until the
+     * watchdog has brought the old one back. */
+    crc[2] = make_program(KIND_HUB, FW_SLOT_B, V_NEW, SIM_ACT_HANG, 2113);
+    CHECK(send_program("hub"));
+    hub_reset();
+    sim_run(&s, SIM_WDT_MS - 500);
+    CHECK_EQ(s.hub.n.act, SIM_ACT_HANG);
+    CHECK(tiles_dark());
+    sim_run(&s, 5000);
+    CHECK_EQ(s.hub.n.wdt_resets, 1);
+    CHECK_EQ(s.hub.n.slot, FW_SLOT_A);
+    check_settled();
+    SAY_OK("fw hub");
+    CHECK(has_linef("hub: runs a none 0001 %08x, other tried %08x", (unsigned)was[2], (unsigned)crc[2]));
+
+    /* The hub in its ROM feeds nobody either, for as long as it sits there. */
+    SAY_OK("bootloader hub");
+    sim_run(&s, 1000);
+    CHECK(s.hub.n.halted);
+    CHECK(tiles_dark());
+    sim_run(&s, 5000);
+    CHECK(tiles_dark());
+
+    /* (A test may change its mind at any time: with power of their own the
+     * tiles start, and they stop when it is taken away again.) */
+    s.hub_feeds = false;
+    sim_run(&s, SIM_BOOT_MS + 1);
+    CHECK(alive(0) && alive(1));
+    s.hub_feeds = true;
+    sim_run(&s, 1);
+    CHECK(tiles_dark());
+
+    sim_power(&s, SIM_HUB, false);
+    sim_run(&s, 100);
+    sim_power(&s, SIM_HUB, true);
+    sim_run(&s, 4000);
+    check_settled();
+
+    /* A tile that is switched off stays off when the hub feeds the others;
+     * switched on while the hub is off, it starts when the hub feeds it. */
+    sim_power(&s, 0, false);
+    hub_reset();
+    sim_run(&s, 4000);
+    CHECK(!s.tile[0].n.powered);
+    CHECK(alive(1));
+    check_settled();
+    sim_power(&s, SIM_HUB, false);
+    sim_power(&s, 0, true);
+    sim_run(&s, 500);
+    CHECK(tiles_dark());
+    sim_power(&s, SIM_HUB, true);
+    sim_run(&s, SIM_BOOT_MS + SIM_FEED_MS - 10);
+    CHECK(tiles_dark());
+    sim_run(&s, 4000);
+    check_settled();
+    SAY_OK("tiles");
+    CHECK(has_line("2 tiles"));
+
+    /* After all of which it is a keyboard, and nothing in flash is damaged. */
+    midi_clear();
+    for (int i = 0; i < 2; i++) {
+        press(i, 9, 20);
+        sim_run(&s, 100);
+        lift(i, 9, 20);
+        sim_run(&s, 100);
+    }
+    CHECK_EQ(midi_count(0x90, -1), 2);
+    CHECK_EQ(midi_sounding(), 0);
+    CHECK_EQ(s.tile[0].n.reboots, 0);
+    CHECK_EQ(s.tile[1].n.reboots, 1);
+    CHECK_EQ(s.tile[0].n.slot, FW_SLOT_B);
+    CHECK_EQ(s.tile[1].n.slot, FW_SLOT_A);
+    for (int i = SIM_HUB; i < 2; i++) {
+        const sim_node_t *n = i == SIM_HUB ? &s.hub.n : &s.tile[i].n;
+        CHECK(!n->trial);
+        CHECK_EQ(n->no_program, 0);
+        CHECK_EQ(n->chip.stray, 0);
+        CHECK_EQ(n->chip.rewrites, 0);
+    }
+}
+
 int main(void)
 {
     RUN(one_tile_crossed_cable);
@@ -1578,5 +2399,10 @@ int main(void)
     RUN(sensors_with_spread_and_noise);
     RUN(wrong_cable);
     RUN(clocks_wrap);
+    RUN(firmware_update);
+    RUN(firmware_goes_back);
+    RUN(firmware_power_cut);
+    RUN(firmware_refused);
+    RUN(power_through_the_hub);
     return T_DONE();
 }

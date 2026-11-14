@@ -42,6 +42,8 @@ enum { PORT_W = 0, PORT_N = 1, PORT_E = 2, PORT_S = 3, TILE_PORTS = 4 };
 #define HELLO_LEN          7
 #define BEACON_LEN         8
 #define CMD_HEAD_LEN       6            /* target, counter, op */
+#define CMD_MAX_ARGS       (FRAME_MAX_PAYLOAD - CMD_HEAD_LEN)
+#define REPLY_MAX_DATA     18           /* what follows the counter and the status */
 #define UP_HEAD_LEN        4            /* the writer's ID */
 #define INFO_LEN           (UP_HEAD_LEN + 33)
 #define STATE_LEN          (UP_HEAD_LEN + 6)
@@ -53,6 +55,8 @@ enum { PORT_W = 0, PORT_N = 1, PORT_E = 2, PORT_S = 3, TILE_PORTS = 4 };
 enum {
     OP_PING = 1, OP_GET = 2, OP_SET = 3, OP_SAVE = 4, OP_CAL = 5,
     OP_RAW = 6, OP_REBOOT = 7, OP_BOOTLOADER = 8, OP_QUIET = 9,
+    /* firmware update (fw.h); only for one tile at a time, never for all */
+    OP_FW_INFO = 10, OP_FW_BEGIN = 11, OP_FW_WRITE = 12, OP_FW_COMMIT = 13, OP_FW_CONFIRM = 14,
 };
 enum { CAL_STOP = 0, CAL_START = 1, CAL_FORGET = 2 };
 
@@ -69,6 +73,9 @@ enum {
 #define INFO_CALIBRATED    0x01u        /* every key's bottom has been measured */
 #define INFO_CALIBRATING   0x02u
 #define INFO_RAW           0x04u
+#define INFO_SLOT_B        0x08u        /* the program runs from slot B (fw.h) */
+#define INFO_TRIAL         0x10u        /* a new program on trial: confirm it, or it goes */
+#define INFO_STAGED        0x20u        /* a new program waits for the next restart */
 
 /* ---- times, in milliseconds ---- */
 #define HELLO_PERIOD_MS    100

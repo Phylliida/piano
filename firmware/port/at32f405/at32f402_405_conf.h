@@ -28,6 +28,7 @@ extern "C" {
 #define PWC_MODULE_ENABLED
 #define TMR_MODULE_ENABLED
 #define USART_MODULE_ENABLED
+#define WDT_MODULE_ENABLED
 
 #ifdef ADC_MODULE_ENABLED
 #include "at32f402_405_adc.h"
@@ -58,6 +59,9 @@ extern "C" {
 #endif
 #ifdef USART_MODULE_ENABLED
 #include "at32f402_405_usart.h"
+#endif
+#ifdef WDT_MODULE_ENABLED
+#include "at32f402_405_wdt.h"
 #endif
 
 #ifdef __cplusplus

@@ -1,4 +1,5 @@
 /* store.c and tile.c: one tile, its hub played by hand on the east port. */
+#include "flashsim.h"
 #include "lut.h"
 #include "t.h"
 #include "tile.h"
@@ -140,7 +141,7 @@ static const sent_t *last(const rig_t *r, uint8_t type)
 static void cmd_to(rig_t *r, uint32_t target, uint8_t counter, uint8_t op,
                    const uint8_t *arg, uint8_t n)
 {
-    uint8_t pl[CMD_HEAD_LEN + 8];
+    uint8_t pl[FRAME_MAX_PAYLOAD];
 
     put32(pl, target);
     pl[4] = counter;
@@ -699,6 +700,200 @@ static void raw(void)
     CHECK_EQ(count(&r, FT_RAW), 0);
 }
 
+/* ---- firmware update: the commands, on top of what test_fw.c tries ---- */
+
+static flashsim_t chip;                 /* 256 KB: not for the stack */
+static uint8_t image[16384];
+#define IMAGE_LEN  6000u
+
+/* A chip with a tile's program in slot A, and one for slot B in image[]. */
+static fw_flash_t chip_init(void)
+{
+    flashsim_init(&chip, 7);
+    flashsim_image(image, IMAGE_LEN, KIND_TILE, FW_SLOT_A, FW_VERSION, SIM_ACT_RUN, 1);
+    flashsim_put(&chip, FW_SLOT_A, image, IMAGE_LEN);
+    flashsim_image(image, IMAGE_LEN, KIND_TILE, FW_SLOT_B, FW_VERSION + 1, SIM_ACT_RUN, 2);
+    return flashsim_flash(&chip);
+}
+
+static uint8_t info_flags(rig_t *r)
+{
+    const sent_t *s;
+
+    r->nout = 0;
+    run(r, INFO_PERIOD_MS + 1);
+    s = last(r, FT_INFO);
+    CHECK(s != NULL);
+    return s ? s->pl[6] : 0xFF;
+}
+
+static void firmware(void)
+{
+    static rig_t r;
+    fw_flash_t flash = chip_init();
+    const sent_t *s;
+    uint8_t arg[CMD_MAX_ARGS], counter = 0;
+    uint32_t at;
+
+    /* a tile that was not given its flash knows none of this */
+    rig_init(&r, NULL, 0);
+    cmd_reply(&r, ++counter, OP_FW_INFO, NULL, 0, ST_UNKNOWN, 0);
+    put32(arg, IMAGE_LEN);
+    cmd_reply(&r, ++counter, OP_FW_BEGIN, arg, 4, ST_UNKNOWN, 0);
+    cmd_reply(&r, ++counter, OP_FW_CONFIRM, NULL, 0, ST_UNKNOWN, 0);
+    CHECK_EQ(info_flags(&r), 0);
+
+    rig_init(&r, NULL, 0);
+    tile_set_flash(&r.t, &flash, FW_SLOT_A);
+    s = cmd_reply(&r, ++counter, OP_FW_INFO, NULL, 0, ST_OK, FW_INFO_LEN);
+    CHECK_EQ(s->pl[6], FW_SLOT_A);
+    CHECK_EQ(s->pl[7], FW_NONE);
+    CHECK_EQ(s->pl[9], 0);
+    CHECK_EQ(get16(s->pl + 10), FW_VERSION);
+    CHECK_EQ(get32(s->pl + 12), get32(chip.mem + FW_BOOT_LEN + IMAGE_LEN - 4));
+    CHECK_EQ(info_flags(&r), 0);
+
+    /* arguments that are too short */
+    cmd_reply(&r, ++counter, OP_FW_BEGIN, arg, 3, ST_BAD_ARG, 0);
+    cmd_reply(&r, ++counter, OP_FW_WRITE, arg, 3, ST_BAD_ARG, 0);
+    s = cmd_reply(&r, ++counter, OP_FW_WRITE, arg, 4, ST_FAILED, 4);    /* no begin yet */
+    CHECK_EQ(chip.erases + chip.programs, 0);
+
+    /* sent to everybody, they do nothing: nobody would hear how it went */
+    cmd_to(&r, ID_ALL, 200, OP_FW_BEGIN, arg, 4);
+    cmd_to(&r, ID_ALL, 201, OP_FW_CONFIRM, NULL, 0);
+    CHECK_EQ(chip.erases + chip.programs, 0);
+    CHECK(!r.t.fw.open);
+
+    cmd_reply(&r, ++counter, OP_FW_BEGIN, arg, 4, ST_OK, 0);
+    CHECK(r.t.fw.open);
+    for (at = 0; at < IMAGE_LEN;) {
+        uint8_t n = (uint8_t)(IMAGE_LEN - at < FW_CHUNK ? IMAGE_LEN - at : FW_CHUNK);
+        unsigned programs = chip.programs;
+
+        put32(arg, at);
+        memcpy(arg + 4, image + at, n);
+        s = cmd_reply(&r, ++counter, OP_FW_WRITE, arg, (uint8_t)(4 + n), ST_OK, 4);
+        CHECK_EQ(get32(s->pl + 6), at + n);
+        CHECK_EQ(chip.programs, programs + 1);
+
+        if (at == 480) {
+            /* the reply was lost and the hub says it again: answered again, written once */
+            s = cmd_reply(&r, counter, OP_FW_WRITE, arg, (uint8_t)(4 + n), ST_OK, 4);
+            CHECK_EQ(get32(s->pl + 6), at + n);
+            CHECK_EQ(chip.programs, programs + 1);
+            /* the same bytes as a new command: refused, with where the image stands */
+            s = cmd_reply(&r, ++counter, OP_FW_WRITE, arg, (uint8_t)(4 + n), ST_BAD_ARG, 4);
+            CHECK_EQ(get32(s->pl + 6), at + n);
+            /* and a piece from further on likewise */
+            put32(arg, at + 2 * FW_CHUNK);
+            s = cmd_reply(&r, ++counter, OP_FW_WRITE, arg, (uint8_t)(4 + n), ST_BAD_ARG, 4);
+            CHECK_EQ(get32(s->pl + 6), at + n);
+            CHECK_EQ(chip.programs, programs + 1);
+
+            s = cmd_reply(&r, ++counter, OP_FW_INFO, NULL, 0, ST_OK, FW_INFO_LEN);
+            CHECK_EQ(s->pl[8], FW_PARTIAL);
+            CHECK_EQ(s->pl[9], FW_F_OPEN);
+            CHECK_EQ(get32(s->pl + 20), at + n);
+            /* too early */
+            s = cmd_reply(&r, ++counter, OP_FW_COMMIT, NULL, 0, ST_BAD_ARG, 4);
+            CHECK_EQ(get32(s->pl + 6), at + n);
+        }
+        at += n;
+    }
+    CHECK_EQ(info_flags(&r), 0);
+    cmd_reply(&r, ++counter, OP_FW_COMMIT, NULL, 0, ST_OK, 4);
+    cmd_reply(&r, counter, OP_FW_COMMIT, NULL, 0, ST_OK, 4);            /* a repeat */
+    cmd_reply(&r, ++counter, OP_FW_COMMIT, NULL, 0, ST_OK, 4);          /* asked twice */
+    CHECK_EQ(fw_slot_state(chip.mem, FW_SLOT_B), FW_NEW);
+    CHECK(memcmp(chip.mem + (FW_SLOT_B_ADDR - FW_FLASH_BASE), image, IMAGE_LEN) == 0);
+    s = cmd_reply(&r, ++counter, OP_FW_INFO, NULL, 0, ST_OK, FW_INFO_LEN);
+    CHECK_EQ(s->pl[8], FW_NEW);
+    CHECK_EQ(s->pl[9], FW_F_OTHER_VALID | FW_F_STAGED);
+    CHECK_EQ(get32(s->pl + 16), get32(image + IMAGE_LEN - 4));
+    CHECK_EQ(info_flags(&r), INFO_STAGED);
+    /* nothing to confirm here, and no harm in it */
+    cmd_reply(&r, ++counter, OP_FW_CONFIRM, NULL, 0, ST_OK, 0);
+    CHECK_EQ(fw_slot_state(chip.mem, FW_SLOT_A), FW_NONE);
+    CHECK_EQ(chip.stray, 0);
+    CHECK_EQ(chip.rewrites, 0);
+
+    /* nothing restarts a tile that is not on trial */
+    run(&r, FW_TRIAL_MS + 1000);
+    CHECK_EQ(tile_actions(&r.t), 0);
+}
+
+/* The restart after an update: the bootloader picks the new program, and the
+ * tile runs it on trial until it is told that it does well. */
+static void firmware_trial(void)
+{
+    static rig_t r;
+    fw_flash_t flash = chip_init();
+    uint8_t arg[4], counter = 0;
+    bool trial;
+
+    flashsim_put(&chip, FW_SLOT_B, image, IMAGE_LEN);
+    flashsim_trailer(&chip, FW_SLOT_B, FW_NEW, 1);
+    CHECK_EQ(fw_boot_choose(&flash, &trial), FW_SLOT_B);
+    CHECK(trial);
+
+    /* nobody confirms: after a minute it asks for a restart, once */
+    rig_init(&r, NULL, 0);
+    tile_set_flash(&r.t, &flash, FW_SLOT_B);
+    CHECK_EQ(info_flags(&r), INFO_SLOT_B | INFO_TRIAL);
+    put32(arg, IMAGE_LEN);
+    cmd_reply(&r, ++counter, OP_FW_BEGIN, arg, 4, ST_BUSY, 0);  /* the old program stays */
+    CHECK_EQ(chip.erases, 0);
+    while (since(r.now, r.t.started) < FW_TRIAL_MS - 1) {
+        ms(&r);
+        CHECK_EQ(tile_actions(&r.t), 0);
+    }
+    ms(&r);
+    CHECK_EQ(tile_actions(&r.t), TILE_ACT_REBOOT);
+    run(&r, 5000);
+    CHECK_EQ(tile_actions(&r.t), 0);
+    CHECK_EQ(fw_boot_choose(&flash, &trial), FW_SLOT_A);
+    CHECK(!trial);
+
+    /* A REBOOT in the first second of a trial is the one that started it,
+     * said again by a hub that missed the answer: not obeyed, or the tile
+     * would be back in its old program. Later it is a REBOOT like any. */
+    rig_init(&r, NULL, 0);
+    tile_set_flash(&r.t, &flash, FW_SLOT_B);
+    cmd_reply(&r, ++counter, OP_REBOOT, NULL, 0, ST_BUSY, 0);
+    cmd_to(&r, ID_ALL, 77, OP_REBOOT, NULL, 0);
+    while (since(r.now, r.t.started) < FW_GUARD_MS - 1) {
+        ms(&r);
+        CHECK_EQ(tile_actions(&r.t), 0);
+    }
+    cmd_reply(&r, ++counter, OP_REBOOT, NULL, 0, ST_BUSY, 0);
+    run(&r, ACTION_DELAY_MS + 50);
+    CHECK_EQ(tile_actions(&r.t), 0);
+    cmd_reply(&r, ++counter, OP_REBOOT, NULL, 0, ST_OK, 0);
+    run(&r, ACTION_DELAY_MS - 1);
+    CHECK_EQ(tile_actions(&r.t), 0);
+    ms(&r);
+    CHECK_EQ(tile_actions(&r.t), TILE_ACT_REBOOT);
+
+    /* confirmed in time: it stays, and the next update can come */
+    flashsim_trailer(&chip, FW_SLOT_B, FW_TRIED, 1);
+    rig_init(&r, NULL, 0);
+    tile_set_flash(&r.t, &flash, FW_SLOT_B);
+    run(&r, 30000);
+    cmd_reply(&r, ++counter, OP_FW_CONFIRM, NULL, 0, ST_OK, 0);
+    CHECK_EQ(fw_slot_state(chip.mem, FW_SLOT_B), FW_GOOD);
+    r.nout = 0;
+    run(&r, 60);
+    CHECK_EQ(count(&r, FT_INFO), 1);            /* the hub is told at once */
+    CHECK_EQ(info_flags(&r), INFO_SLOT_B);
+    run(&r, FW_TRIAL_MS);
+    CHECK_EQ(tile_actions(&r.t), 0);
+    CHECK_EQ(fw_boot_choose(&flash, &trial), FW_SLOT_B);
+    cmd_reply(&r, ++counter, OP_FW_BEGIN, arg, 4, ST_OK, 0);
+    CHECK_EQ(chip.stray, 0);
+    CHECK_EQ(chip.rewrites, 0);
+}
+
 int main(void)
 {
     RUN(records);
@@ -712,5 +907,7 @@ int main(void)
     RUN(quiet);
     RUN(positions);
     RUN(raw);
+    RUN(firmware);
+    RUN(firmware_trial);
     return T_DONE();
 }

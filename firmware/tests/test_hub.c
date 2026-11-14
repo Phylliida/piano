@@ -4,6 +4,7 @@
  * answer commands the way tile.c does: a repeat of the last command gets
  * the reply again and is not run twice. */
 #include "hub.h"
+#include "flashsim.h"
 #include "t.h"
 
 #include <stdio.h>
@@ -31,13 +32,16 @@ typedef struct {
     int bcast_runs;
     bool have_cmd, have_bcast;
     uint8_t last_cmd, last_bcast;
-    uint8_t op, arg[8], arg_len;        /* the last command it ran */
-    uint8_t reply[6], reply_len;
+    uint8_t op, arg[CMD_MAX_ARGS], arg_len;     /* the last command it ran */
+    uint8_t reply[2 + REPLY_MAX_DATA], reply_len;
+
+    uint8_t fw_info[FW_INFO_LEN];       /* what it answers OP_FW_INFO with */
+    uint32_t fw_next;                   /* ... and a write or a commit */
 } fake_t;
 
 typedef struct {
     uint32_t at, target;
-    uint8_t counter, op, arg[8], arg_len;
+    uint8_t counter, op, arg[CMD_MAX_ARGS], arg_len;
 } cmd_t;
 
 static hub_t h;
@@ -190,6 +194,12 @@ static void fake_cmd(int i, const cmd_t *c)
         } else if (f->status == ST_OK && c->op == OP_CAL && c->arg[0] == CAL_STOP) {
             f->reply[2] = 37;
             f->reply_len = 3;
+        } else if (f->status == ST_OK && c->op == OP_FW_INFO) {
+            memcpy(f->reply + 2, f->fw_info, FW_INFO_LEN);
+            f->reply_len = 2 + FW_INFO_LEN;
+        } else if (f->status != ST_UNKNOWN && (c->op == OP_FW_WRITE || c->op == OP_FW_COMMIT)) {
+            put32(f->reply + 2, f->fw_next);    /* whether it went well or not */
+            f->reply_len = 6;
         }
     }
     if (f->mute > 0) {
@@ -229,7 +239,7 @@ static void drain(void)
         c->counter = pl[4];
         c->op = pl[5];
         c->arg_len = (uint8_t)(len - CMD_HEAD_LEN);
-        memcpy(c->arg, pl + CMD_HEAD_LEN, c->arg_len > 8 ? 8 : c->arg_len);
+        memcpy(c->arg, pl + CMD_HEAD_LEN, c->arg_len > sizeof c->arg ? sizeof c->arg : c->arg_len);
         for (int i = 0; i < nfake; i++) {
             if (fake[i].alive && (c->target == ID_ALL || c->target == fake[i].id))
                 fake_cmd(i, c);
@@ -2053,6 +2063,372 @@ static void power_console(void)
 
 /* Nobody takes the MIDI or reads the console: the oldest is kept, the rest
  * counted. */
+/* `fw <who> write <offset> <hex>` */
+static void write_line(char *out, const char *who, uint32_t offset, const uint8_t *data, uint32_t n)
+{
+    int at = sprintf(out, "fw %s write %u ", who, (unsigned)offset);
+
+    for (uint32_t i = 0; i < n; i++)
+        at += sprintf(out + at, "%02x", data[i]);
+}
+
+static void firmware(void)
+{
+    char line[HUB_LINE_MAX + 40], who[16];
+    uint8_t data[FW_CHUNK + 4];
+
+    start(3);
+    settle();
+    for (size_t i = 0; i < sizeof data; i++)
+        data[i] = (uint8_t)(0xA0 + 7 * i);
+
+    /* what runs where */
+    uint8_t *d = fake[0].fw_info;
+    d[0] = FW_SLOT_A;
+    d[1] = FW_GOOD;
+    d[2] = FW_NEW;
+    d[3] = FW_F_OTHER_VALID | FW_F_STAGED;
+    put16(d + 4, 0x0001);
+    put32(d + 6, 0x1a2b3c4d);
+    put32(d + 10, 0x55667788);
+    d = fake[1].fw_info;
+    d[0] = FW_SLOT_B;
+    d[1] = FW_TRIED;
+    d[2] = FW_PARTIAL;
+    d[3] = FW_F_OPEN;
+    put16(d + 4, 0x0102);
+    put32(d + 6, 0x0badf00d);
+    put32(d + 10, 0x12345678);          /* not valid: not shown */
+    put32(d + 14, 4800);
+
+    say("fw 0");
+    CHECK(!strcmp(text, "tile 0: runs a good 0001 1a2b3c4d, other new 55667788, staged\r\nok\r\n"));
+    CHECK_EQ(ncmds, 1);
+    CHECK_EQ(cmds[0].target, fake[0].id);
+    CHECK_EQ(cmds[0].op, OP_FW_INFO);
+    CHECK_EQ(cmds[0].arg_len, 0);
+    say("fw all");
+    CHECK(!strcmp(text, "tile 0: runs a good 0001 1a2b3c4d, other new 55667788, staged\r\n"
+                        "tile 1: runs b tried 0102 0badf00d, other partial -, receiving at 4800\r\n"
+                        "tile 2: runs a none 0000 00000000, other none -\r\nok\r\n"));
+    CHECK_EQ(ncmds, 3);
+
+    /* a new program: how long it is */
+    say("fw 1 begin 15120");
+    CHECK(!strcmp(text, "ok\r\n"));
+    CHECK_EQ(ncmds, 1);
+    CHECK_EQ(cmds[0].target, fake[1].id);
+    CHECK_EQ(cmds[0].op, OP_FW_BEGIN);
+    CHECK_EQ(cmds[0].arg_len, 4);
+    CHECK_EQ(get32(cmds[0].arg), 15120);
+
+    /* a piece of it. The longest line there is: a tile by its ID, the
+     * last piece of the largest image */
+    snprintf(who, sizeof who, "%08x", (unsigned)fake[1].id);
+    write_line(line, who, FW_IMAGE_MAX - FW_CHUNK, data, FW_CHUNK);
+    CHECK_EQ(strlen(line), 121);
+    CHECK(strlen(line) <= HUB_LINE_MAX);
+    fake[1].fw_next = FW_IMAGE_MAX;
+    say(line);
+    snprintf(line, sizeof line, "tile 1: at %u\r\nok\r\n", (unsigned)FW_IMAGE_MAX);
+    CHECK(!strcmp(text, line));
+    CHECK_EQ(ncmds, 1);
+    CHECK_EQ(cmds[0].target, fake[1].id);
+    CHECK_EQ(cmds[0].op, OP_FW_WRITE);
+    CHECK_EQ(cmds[0].arg_len, 4 + FW_CHUNK);
+    CHECK_EQ(get32(cmds[0].arg), FW_IMAGE_MAX - FW_CHUNK);
+    CHECK(!memcmp(cmds[0].arg + 4, data, FW_CHUNK));
+    CHECK(!memcmp(fake[1].arg + 4, data, FW_CHUNK));
+
+    /* the shortest; capital letters will do */
+    fake[1].fw_next = 52;
+    say("fw 1 write 48 DEadBEef");
+    CHECK(!strcmp(text, "tile 1: at 52\r\nok\r\n"));
+    CHECK_EQ(cmds[0].arg_len, 8);
+    CHECK_EQ(get32(cmds[0].arg), 48);
+    CHECK_EQ(get32(cmds[0].arg + 4), 0xefbeadde);
+
+    /* the tile does not take it: it says where it is */
+    fake[1].status = ST_BAD_ARG;
+    fake[1].fw_next = 96;
+    say("fw 1 write 48 00112233");
+    CHECK(!strcmp(text, "tile 1: value not allowed, at 96\r\nerror: 1 failed\r\n"));
+    fake[1].status = ST_FAILED;
+    fake[1].fw_next = 0;
+    say("fw 1 write 96 00112233");
+    CHECK(!strcmp(text, "tile 1: failed, at 0\r\nerror: 1 failed\r\n"));
+    /* a tile that knows nothing of all this sends no place */
+    fake[1].status = ST_UNKNOWN;
+    say("fw 1 write 96 00112233");
+    CHECK(!strcmp(text, "tile 1: does not know that\r\nerror: 1 failed\r\n"));
+    say("fw 1");
+    CHECK(!strcmp(text, "tile 1: does not know that\r\nerror: 1 failed\r\n"));
+    fake[1].status = ST_BUSY;
+    say("fw 1 begin 15120");
+    CHECK(!strcmp(text, "tile 1: busy\r\nerror: 1 failed\r\n"));
+
+    /* a piece that gets lost on the way, and its reply too: sent again
+     * with the same counter, written once */
+    fake[1].status = ST_OK;
+    fake[1].fw_next = 100;
+    fake[1].deaf = 1;
+    fake[1].mute = 1;
+    fake[1].runs = 0;
+    say("fw 1 write 96 00112233");
+    CHECK(!strcmp(text, "tile 1: at 100\r\nok\r\n"));
+    CHECK_EQ(ncmds, 3);
+    CHECK(cmds[0].counter == cmds[1].counter && cmds[1].counter == cmds[2].counter);
+    CHECK_EQ(cmds[2].arg_len, 8);
+    CHECK_EQ(fake[1].runs, 1);
+
+    /* all of it is there */
+    fake[1].fw_next = 0;
+    say("fw 1 commit");
+    CHECK(!strcmp(text, "ok\r\n"));
+    CHECK_EQ(ncmds, 1);
+    CHECK_EQ(cmds[0].op, OP_FW_COMMIT);
+    CHECK_EQ(cmds[0].arg_len, 0);
+    /* ... or not */
+    fake[1].status = ST_BAD_ARG;
+    fake[1].fw_next = 4800;
+    say("fw 1 commit");
+    CHECK(!strcmp(text, "tile 1: value not allowed, at 4800\r\nerror: 1 failed\r\n"));
+    fake[1].status = ST_OK;
+
+    /* the new program runs and is to stay */
+    say("fw 2 confirm");
+    CHECK(!strcmp(text, "ok\r\n"));
+    CHECK_EQ(ncmds, 1);
+    CHECK_EQ(cmds[0].target, fake[2].id);
+    CHECK_EQ(cmds[0].op, OP_FW_CONFIRM);
+    CHECK_EQ(cmds[0].arg_len, 0);
+    fake[0].status = ST_FAILED;
+    say("fw all confirm");
+    CHECK(!strcmp(text, "tile 0: failed\r\nerror: 1 failed\r\n"));
+    CHECK_EQ(ncmds, 3);
+    CHECK_EQ(cmds[2].op, OP_FW_CONFIRM);
+    fake[0].status = ST_OK;
+
+    /* what cannot be asked: nothing goes out */
+    static const char *const bad[] = {
+        "fw", "fw 1 frob", "fw 1 begin", "fw 1 begin x", "fw 1 begin -4", "fw 1 write",
+        "fw 1 write 0", "fw 1 write x 00112233", "fw 1 write -4 00112233",
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        say(bad[i]);
+        CHECK(!strcmp(text, "error: usage: fw <tile|all|hub> [begin <length> | "
+                            "write <offset> <hex> | commit | confirm]\r\n"));
+        CHECK_EQ(ncmds, 0);
+    }
+    write_line(line, "1", 0, data, FW_CHUNK + 4);
+    static const char *const odd[] = {
+        "fw 1 write 0 001122", "fw 1 write 0 0011223", "fw 1 write 0 0011223g",
+        "fw 1 write 0 00112233445566", "fw 1 write 0 0x112233",
+    };
+    for (size_t i = 0; i <= sizeof odd / sizeof odd[0]; i++) {
+        say(i < sizeof odd / sizeof odd[0] ? odd[i] : line);
+        CHECK(!strcmp(text, "error: write takes 4 to 48 bytes, a multiple of 4, as hex digits\r\n"));
+        CHECK_EQ(ncmds, 0);
+    }
+    say("fw all begin 15120");
+    CHECK(!strcmp(text, "error: a new program goes to one tile at a time\r\n"));
+    say("fw all write 0 00112233");
+    CHECK(!strcmp(text, "error: a new program goes to one tile at a time\r\n"));
+    say("fw all commit");
+    CHECK(!strcmp(text, "error: a new program goes to one tile at a time\r\n"));
+    say("fw 9");
+    CHECK(!strcmp(text, "error: no such tile\r\n"));
+    say("fw 9 commit");
+    CHECK(!strcmp(text, "error: no such tile\r\n"));
+    CHECK_EQ(ncmds, 0);
+
+    /* what the tiles say of themselves */
+    fake[0].flags = INFO_CALIBRATED | INFO_SLOT_B | INFO_TRIAL;
+    fake[1].flags = INFO_STAGED;
+    settle();
+    say("tiles");
+    CHECK(said(" fw 0001 calibrated trial\r\n"));
+    CHECK(said(" fw 0001 staged\r\n"));
+    say("info 0");
+    CHECK(said("firmware 0001, 8 x 5 keys, calibrated trial\r\n"));
+
+    /* no tiles */
+    start(0);
+    say("fw all");
+    CHECK(!strcmp(text, "error: no tiles\r\n"));
+}
+
+static flashsim_t chip;
+static uint8_t image[8192];
+
+/* Send image[0..length) to the hub itself, in pieces of `piece` bytes. */
+static void send_hub_image(uint32_t length, uint32_t piece)
+{
+    char line[HUB_LINE_MAX + 1], want[64];
+
+    for (uint32_t at = 0; at < length; at += piece) {
+        uint32_t n = length - at < piece ? length - at : piece;
+
+        write_line(line, "hub", at, image + at, n);
+        say(line);
+        snprintf(want, sizeof want, "hub: at %u\r\nok\r\n", (unsigned)(at + n));
+        CHECK(!strcmp(text, want));
+        CHECK_EQ(ncmds, 0);             /* none of this is the tiles' business */
+    }
+}
+
+/* The hub's own program: `fw hub` does at once what a tile does on command. */
+static void firmware_hub(void)
+{
+    const uint32_t len_a = 3000, len_b = 4000;
+    char want[200];
+    uint32_t crc_a, crc_b, t0;
+    bool trial;
+
+    /* a hub that was not told where its program is */
+    start(1);
+    settle();
+    say("fw hub");
+    CHECK(!strcmp(text, "hub: does not know that\r\nerror: 1 failed\r\n"));
+    say("fw hub begin 4000");
+    CHECK(!strcmp(text, "hub: does not know that\r\nerror: 1 failed\r\n"));
+    say("fw hub write 0 00112233");
+    CHECK(!strcmp(text, "hub: does not know that\r\nerror: 1 failed\r\n"));
+    say("fw hub commit");
+    CHECK(!strcmp(text, "hub: does not know that\r\nerror: 1 failed\r\n"));
+    say("fw hub confirm");
+    CHECK(!strcmp(text, "hub: does not know that\r\nerror: 1 failed\r\n"));
+
+    /* as it comes from the factory: a program in slot A, nothing else */
+    flashsim_init(&chip, 7);
+    fw_flash_t flash = flashsim_flash(&chip);
+    flashsim_image(image, len_a, KIND_HUB, FW_SLOT_A, 0x0001, SIM_ACT_RUN, 1);
+    flashsim_put(&chip, FW_SLOT_A, image, len_a);
+    crc_a = get32(image + len_a - 4);
+    hub_set_flash(&h, &flash, FW_SLOT_A);
+    say("fw hub");
+    snprintf(want, sizeof want, "hub: runs a none 0001 %08x, other none -\r\nok\r\n", (unsigned)crc_a);
+    CHECK(!strcmp(text, want));
+    say("fw hub confirm");              /* nothing to confirm */
+    CHECK(!strcmp(text, "ok\r\n"));
+
+    /* a new one for slot B */
+    flashsim_image(image, len_b, KIND_HUB, FW_SLOT_B, 0x0002, SIM_ACT_RUN, 2);
+    crc_b = get32(image + len_b - 4);
+    say("fw hub begin 5");
+    CHECK(!strcmp(text, "hub: value not allowed\r\nerror: 1 failed\r\n"));
+    say("fw hub begin 4000");
+    CHECK(!strcmp(text, "ok\r\n"));
+    say("fw hub");
+    snprintf(want, sizeof want,
+             "hub: runs a none 0001 %08x, other partial -, receiving at 0\r\nok\r\n", (unsigned)crc_a);
+    CHECK(!strcmp(text, want));
+    send_hub_image(960, FW_CHUNK);
+    /* the same piece again, a commit too early: where the hub is */
+    say("fw hub write 912 00112233");
+    CHECK(!strcmp(text, "hub: value not allowed, at 960\r\nerror: 1 failed\r\n"));
+    say("fw hub commit");
+    CHECK(!strcmp(text, "hub: value not allowed, at 960\r\nerror: 1 failed\r\n"));
+    say("fw hub");
+    CHECK(said(", other partial -, receiving at 960\r\n"));
+    memmove(image, image + 960, len_b - 960);
+    char line[HUB_LINE_MAX + 1];
+    for (uint32_t at = 960; at < len_b; at += 20) {     /* in smaller pieces from here */
+        write_line(line, "hub", at, image + at - 960, 20);
+        say(line);
+        snprintf(want, sizeof want, "hub: at %u\r\nok\r\n", (unsigned)(at + 20));
+        CHECK(!strcmp(text, want));
+    }
+    say("fw hub commit");
+    CHECK(!strcmp(text, "ok\r\n"));
+    say("fw hub commit");               /* asked twice: still so */
+    CHECK(!strcmp(text, "ok\r\n"));
+    say("fw hub");
+    snprintf(want, sizeof want, "hub: runs a none 0001 %08x, other new %08x, staged\r\nok\r\n",
+             (unsigned)crc_a, (unsigned)crc_b);
+    CHECK(!strcmp(text, want));
+    CHECK_EQ(chip.stray, 0);
+    CHECK_EQ(chip.rewrites, 0);
+    run(FW_TRIAL_MS + 1000);
+    CHECK_EQ(acts, 0);                  /* not on trial: no restart */
+    CHECK_EQ(ncmds, 0);
+
+    /* the hub restarts, and the bootloader starts the new one: on trial */
+    CHECK_EQ(fw_boot_choose(&flash, &trial), FW_SLOT_B);
+    CHECK(trial);
+    hub_init(&h, UID, NULL, 0, now);
+    hub_set_flash(&h, &flash, FW_SLOT_B);
+    t0 = now;
+    clear();
+    say("fw hub");
+    snprintf(want, sizeof want, "hub: runs b tried 0002 %08x, other none %08x\r\nok\r\n",
+             (unsigned)crc_b, (unsigned)crc_a);
+    CHECK(!strcmp(text, want));
+    say("fw hub begin 4000");           /* no new program while this one is on trial */
+    CHECK(!strcmp(text, "hub: busy\r\nerror: 1 failed\r\n"));
+    /* nobody confirms it: a restart, once, and the bootloader takes the old one */
+    clear();
+    run(t0 + FW_TRIAL_MS - 1 - now);
+    CHECK_EQ(acts, 0);
+    run(1);
+    CHECK_EQ(acts, HUB_ACT_REBOOT);
+    clear();
+    run(5000);
+    CHECK_EQ(acts, 0);
+    CHECK_EQ(fw_boot_choose(&flash, &trial), FW_SLOT_A);
+    CHECK(!trial);
+
+    /* the same again, and this time somebody confirms it */
+    flashsim_trailer(&chip, FW_SLOT_B, FW_TRIED, 1);
+    hub_init(&h, UID, NULL, 0, now);
+    hub_set_flash(&h, &flash, FW_SLOT_B);
+    run(FW_TRIAL_MS - 500);
+    say("fw hub confirm");
+    CHECK(!strcmp(text, "ok\r\n"));
+    clear();
+    run(5000);
+    CHECK_EQ(acts, 0);
+    say("fw hub");
+    snprintf(want, sizeof want, "hub: runs b good 0002 %08x, other none %08x\r\nok\r\n",
+             (unsigned)crc_b, (unsigned)crc_a);
+    CHECK(!strcmp(text, want));
+    CHECK_EQ(fw_boot_choose(&flash, &trial), FW_SLOT_B);
+    CHECK(!trial);
+
+    /* a tile's program is not for the hub: all of it goes in, and commit says no */
+    flashsim_image(image, len_a, KIND_TILE, FW_SLOT_A, 0x0003, SIM_ACT_RUN, 3);
+    say("fw hub begin 3000");
+    CHECK(!strcmp(text, "ok\r\n"));
+    send_hub_image(len_a, FW_CHUNK);
+    say("fw hub commit");
+    CHECK(!strcmp(text, "hub: failed, at 0\r\nerror: 1 failed\r\n"));
+    say("fw hub");                      /* a whole image, and nothing the bootloader would start */
+    snprintf(want, sizeof want, "hub: runs b good 0002 %08x, other partial %08x\r\nok\r\n",
+             (unsigned)crc_b, (unsigned)get32(image + len_a - 4));
+    CHECK(!strcmp(text, want));
+    CHECK_EQ(fw_boot_choose(&flash, &trial), FW_SLOT_B);
+
+    /* the flash fails under a write: that update is over, the next can begin */
+    flashsim_image(image, len_a, KIND_HUB, FW_SLOT_A, 0x0003, SIM_ACT_RUN, 3);
+    say("fw hub begin 3000");
+    send_hub_image(96, FW_CHUNK);
+    chip.fail_at = 1;
+    write_line(line, "hub", 96, image + 96, FW_CHUNK);
+    say(line);
+    CHECK(!strcmp(text, "hub: failed, at 0\r\nerror: 1 failed\r\n"));
+    say(line);
+    CHECK(!strcmp(text, "hub: failed, at 0\r\nerror: 1 failed\r\n"));
+    say("fw hub begin 3000");
+    CHECK(!strcmp(text, "ok\r\n"));
+    send_hub_image(len_a, FW_CHUNK);
+    say("fw hub commit");
+    CHECK(!strcmp(text, "ok\r\n"));
+    CHECK_EQ(fw_boot_choose(&flash, &trial), FW_SLOT_A);
+    CHECK(trial);
+    CHECK_EQ(chip.stray, 0);
+    CHECK_EQ(chip.rewrites, 0);
+}
+
 static void overflow(void)
 {
     start(1);
@@ -2111,6 +2487,8 @@ int main(void)
     RUN(bridge);
     RUN(streams);
     RUN(power_console);
+    RUN(firmware);
+    RUN(firmware_hub);
     RUN(overflow);
     return T_DONE();
 }

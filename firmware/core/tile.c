@@ -3,6 +3,9 @@
 #include <string.h>
 
 #define RAW_PER_FRAME  20       /* a scan goes out as two RAW frames */
+
+_Static_assert(FW_INFO_LEN <= REPLY_MAX_DATA, "FW_INFO has to fit a REPLY");
+_Static_assert(4 + FW_CHUNK <= CMD_MAX_ARGS, "FW_WRITE has to fit a CMD");
 #define ST_LATER       0xFFu    /* not a status on the wire: the reply comes when the flash is done */
 
 /* ---------------------------------------------------------- what it sends --- */
@@ -43,6 +46,12 @@ static void send_info(tile_t *t)
         flags |= INFO_CALIBRATING;
     if (t->raw)
         flags |= INFO_RAW;
+    if (t->fw.slot == FW_SLOT_B)
+        flags |= INFO_SLOT_B;
+    if (t->fw.trial)
+        flags |= INFO_TRIAL;
+    if (t->fw.staged)
+        flags |= INFO_STAGED;
 
     put16(body, FW_VERSION);
     body[2] = flags;
@@ -99,10 +108,53 @@ static void send_raw(tile_t *t)
 
 /* --------------------------------------------------------------- commands --- */
 
+/* Firmware update: fw.h. These stand still while the flash works: under a
+ * millisecond for a write, tens of them where a sector is erased first. */
+static uint8_t run_fw(tile_t *t, uint8_t op, const uint8_t *arg, uint8_t n, uint8_t *data,
+                      uint8_t *dn)
+{
+    uint32_t next = 0;
+    uint8_t status;
+
+    if (t->fw.slot == FW_NO_SLOT)
+        return ST_UNKNOWN;
+    switch (op) {
+    case OP_FW_INFO:
+        fw_info(&t->fw, data);
+        *dn = FW_INFO_LEN;
+        return ST_OK;
+
+    case OP_FW_BEGIN:
+        if (n < 4)
+            return ST_BAD_ARG;
+        t->node.changed = true;         /* the INFO flags may change: tell the hub now */
+        return fw_begin(&t->fw, get32(arg));
+
+    case OP_FW_WRITE:
+        if (n < 4)
+            return ST_BAD_ARG;
+        status = fw_write(&t->fw, get32(arg), arg + 4, (uint8_t)(n - 4), &next);
+        break;
+
+    case OP_FW_COMMIT:
+        status = fw_commit(&t->fw, &next);
+        t->node.changed = true;
+        break;
+
+    default:                            /* OP_FW_CONFIRM */
+        t->node.changed = true;
+        return fw_confirm(&t->fw);
+    }
+    /* where the image stands, so that a sender who lost count finds back */
+    put32(data, next);
+    *dn = 4;
+    return status;
+}
+
 /* Do what a command says. Returns the status for the reply and, in
- * data/dn, what goes after it. */
+ * data/dn, what goes after it: REPLY_MAX_DATA bytes at most. */
 static uint8_t run(tile_t *t, uint8_t op, const uint8_t *arg, uint8_t n, bool reply_wanted,
-                   uint8_t counter, uint8_t data[4], uint8_t *dn)
+                   uint8_t counter, uint8_t *data, uint8_t *dn)
 {
     *dn = 0;
     switch (op) {
@@ -153,6 +205,12 @@ static uint8_t run(tile_t *t, uint8_t op, const uint8_t *arg, uint8_t n, bool re
 
     case OP_REBOOT:
     case OP_BOOTLOADER:
+        /* The REBOOT that started a new program is repeated by a hub that
+         * did not hear the answer, and the repeat finds the new program, which
+         * has never seen its counter. Obeyed, it would end the trial: the
+         * bootloader starts a program on trial once. */
+        if (op == OP_REBOOT && t->fw.trial && since(t->now, t->started) < FW_GUARD_MS)
+            return ST_BUSY;
         t->later = op == OP_REBOOT ? TILE_ACT_REBOOT : TILE_ACT_BOOTLOADER;
         t->later_at = t->now + ACTION_DELAY_MS;
         return ST_OK;
@@ -162,6 +220,14 @@ static uint8_t run(tile_t *t, uint8_t op, const uint8_t *arg, uint8_t n, bool re
             return ST_BAD_ARG;
         node_quiet(&t->node, get16(arg), t->now);
         return ST_OK;
+
+    case OP_FW_INFO:
+    case OP_FW_BEGIN:
+    case OP_FW_WRITE:
+    case OP_FW_COMMIT:
+    case OP_FW_CONFIRM:
+        /* each of these needs its answer: not for a command sent to everybody */
+        return reply_wanted ? run_fw(t, op, arg, n, data, dn) : ST_UNKNOWN;
 
     default:
         return ST_UNKNOWN;
@@ -185,7 +251,7 @@ static void on_cmd(void *ctx, uint8_t port, uint8_t type, const uint8_t *pl, uin
                    uint32_t now)
 {
     tile_t *t = ctx;
-    uint8_t data[4], dn;
+    uint8_t data[REPLY_MAX_DATA], dn;
 
     (void)port;
     if (type != FT_CMD || len < CMD_HEAD_LEN)
@@ -280,6 +346,12 @@ void tile_init(tile_t *t, const uint8_t uid[12], const uint8_t *record, size_t r
     t->next_info = now + rng_range(&t->node.rng, 1, INFO_PERIOD_MS);
     t->next_pos = now;
     t->next_raw = now;
+    fw_init(&t->fw, NULL, KIND_TILE, FW_NO_SLOT);
+}
+
+void tile_set_flash(tile_t *t, const fw_flash_t *flash, uint8_t slot)
+{
+    fw_init(&t->fw, flash, KIND_TILE, slot);
 }
 
 void tile_rx(tile_t *t, uint8_t port, const uint8_t *data, size_t len, uint32_t now)
@@ -304,6 +376,12 @@ void tile_tick(tile_t *t, uint32_t now)
     if (t->later && reached(now, t->later_at)) {
         t->actions |= t->later;
         t->later = 0;
+    }
+    /* A new program that nobody confirmed: perhaps it cannot hear. A restart,
+     * and the bootloader takes the program before it. */
+    if (t->fw.trial && !t->trial_over && since(now, t->started) >= FW_TRIAL_MS) {
+        t->trial_over = true;
+        t->actions |= TILE_ACT_REBOOT;
     }
 
     if (t->node.changed || reached(now, t->next_info)) {

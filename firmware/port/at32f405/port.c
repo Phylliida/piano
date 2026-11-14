@@ -1,55 +1,30 @@
 /* The AT32F405RCT7 itself: clock, time, the chip's ID, restarting. */
 #include "port.h"
 
-/* ---- going to the ROM bootloader ----
+/* ---- restarting ----
  *
- * The chip has no register that maps the boot memory in place of flash
- * (SCFG's MEM_MAP_SEL is read-only), so the way in is "method 2" of
- * Artery's note AN0008, "Jump to Boot Memory": leave a mark that survives a
- * reset, reset, and before anything is switched on (clocks at their reset
- * state, PLL off, no interrupt enabled) load the stack pointer and the start
- * address from the first two words of the boot memory.
- *
- * Three differences from the note: the mark is a word in RAM that the
- * start-up code does not clear, where the note uses a battery-domain
- * register; the jump is at the top of main(), where the note's is at the
- * top of SystemInit() (Artery's SystemInit only puts the clock back on the
- * internal oscillator); and the vector table register is pointed at the boot
- * memory, which the note leaves alone.
- *
- * Not verified: the note was written for and tried on another chip of the
- * family and names no address for this one. 0x1FFFA400 is the boot memory's
- * start in the AT32F405 datasheet (table 5, 20 KB). It has not been tried.
- * If it does not work, the BOOT0 pad still does. */
-#define BOOT_ROM     0x1FFFA400u
-#define BOOT_MAGIC   0xB007AB1Eu
-
-static uint32_t boot_word __attribute__((section(".noinit")));
-
-void port_boot_check(void)
-{
-    if (boot_word != BOOT_MAGIC)
-        return;
-    boot_word = 0;
-
-    const uint32_t *rom = (const uint32_t *)BOOT_ROM;
-    uint32_t sp = rom[0], pc = rom[1];
-    SCB->VTOR = BOOT_ROM;
-    __asm volatile("msr msp, %0\n"
-                   "bx %1\n" : : "r"(sp), "r"(pc));
-    for (;;) {
-    }
-}
-
+ * Every restart goes through our bootloader (boot/main.c), which chooses
+ * the program to start. The way into the ROM bootloader is there too: it
+ * has to be taken straight after a reset, before anything is switched on. */
 void port_bootloader(void)
 {
-    boot_word = BOOT_MAGIC;
+    PORT_MAILBOX = PORT_MAILBOX_ROM;
     nvic_system_reset();
 }
 
 void port_reboot(void)
 {
     nvic_system_reset();
+}
+
+uint8_t port_slot(void)
+{
+    return fw_slot_of((uint32_t)_image_start);
+}
+
+void port_alive(void)
+{
+    wdt_counter_reload();
 }
 
 /* ---- clock ----
@@ -176,6 +151,11 @@ static void pins_start(bool usb)
 
 void port_init(bool usb)
 {
+    /* Artery's SystemInit(), which ran before main(), pointed the chip at
+     * the vector table at the start of flash: the bootloader's. Ours, before
+     * any interrupt is switched on. */
+    SCB->VTOR = (uint32_t)_image_start;
+
     nvic_priority_group_config(NVIC_PRIORITY_GROUP_4);
     clock_start();
     if (usb)

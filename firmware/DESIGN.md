@@ -10,15 +10,21 @@ Nothing here has run on hardware yet: no board has been made.
 
 ```
 core/    portable C11, no hardware access, no allocation. Everything below
-         "Link", "Network", "Keys", "Hub" lives here and runs on a PC too.
+         "Link", "Network", "Keys", "Hub", "Firmware update" lives here and
+         runs on a PC too.
 port/    AT32F405: clock, time, UARTs, flash, I2C, restarting.
+boot/    the bootloader: the first 8 KB of a tile's flash and of the hub's.
+         It chooses the program to start.
 tile/    the tile program: its pins, the key scan, the main loop that joins
          core and port.
 hub/     the hub program: its pins, measuring, USB (TinyUSB), the main loop.
 sim/     a PC program: any arrangement of simulated tiles and a hub, wired
-         by simulated cables (straight or reversed, lossy on request).
-tests/   unit tests of core/ and scenario tests on sim/.
-tools/   fetch the two outside libraries; make the travel table.
+         by simulated cables (straight or reversed, lossy on request), each
+         with its program flash.
+tests/   unit tests of core/, scenario tests on sim/, tests of the tools.
+tools/   fetch the two outside libraries; make the travel table; make
+         program images; send new programs to every tile and the hub; put a
+         tile's first program in through its ROM.
 ```
 
 The core never calls the port. The port (or the simulator) calls the core:
@@ -151,7 +157,9 @@ over several `POS` frames. Each tile starts its `STATE` and `INFO` timers at
 a random moment, so that the tiles of a keyboard do not all send at once.
 
 `INFO`, 33 bytes: firmware version (2), flags (1: bit 0 = every key's bottom
-has been measured, bit 1 = calibrating now, bit 2 = raw mode), columns (1),
+has been measured, bit 1 = calibrating now, bit 2 = raw mode, bit 3 = the
+program runs from slot B, bit 4 = it is on trial, bit 5 = a new program
+waits for the next restart; see Firmware update), columns (1),
 rows (1), parent port (1, 0xFF = none), hops (1, 0xFF = none), then for each
 port W, N, E, S: the neighbour's ID (4, 0 = nobody) and the neighbour's port
 (1); then seconds since start (2, stops at 65535), frames dropped for a bad
@@ -204,14 +212,23 @@ other up port, so each tile gets it once.
 | 4 | SAVE | | write parameters and calibration to flash; the reply comes when that is done (ok or failed); a second SAVE meanwhile: busy |
 | 5 | CAL | 0 stop, 1 start, 2 forget | see Keys; the reply to stop carries the number of keys measured (1) |
 | 6 | RAW | 0 off, 1 on | stream ADC values |
-| 7 | REBOOT | | restart, 250 ms later |
+| 7 | REBOOT | | restart, 250 ms later; busy from a program on trial in its first second |
 | 8 | BOOTLOADER | | restart into the ROM bootloader, 250 ms later |
 | 9 | QUIET | milliseconds (2) | from 20 ms after it arrives: send nothing on any port, and hear nothing, for that long |
+| 10 | FW_INFO | | reply with what the tile runs and what its other slot holds (18) |
+| 11 | FW_BEGIN | length (4) | a new program of that length is coming |
+| 12 | FW_WRITE | offset (4), 4 to 48 bytes | the next piece of it; the reply carries the offset wanted next (4) |
+| 13 | FW_COMMIT | | it is all there: check it, and start it at the next restart; the reply carries the offset (4) |
+| 14 | FW_CONFIRM | | the program that runs is to stay |
 
 The 250 ms let the reply out, and let a repeat of the command still find
 the tile there. The 20 ms let what is queued leave. When a quiet begins the
 queues are emptied and the parent is forgotten; when it ends every link
 starts again (pins the way round they were, `HELLO` at once).
+
+Operations 10 to 14 are for one tile at a time: sent to every tile, they
+are not run. Firmware update, below, says what they do. A `REPLY` carries at
+most 18 bytes of data.
 
 ## Keys (tile)
 
@@ -353,6 +370,9 @@ not wired; the controller is told not to wait for it.
   told), so that nothing but the bridge speaks on the cables. A bridge that
   begins inside such a quiet does not end it: when the bridge is over and
   the quiet is not, the hub keeps silent until the quiet's time is up.
+- `fw <tile|hub> ...` shows what a node runs and gives it a new program, 48
+  bytes to the line. For a tile each line is one `CMD`; for the hub the
+  console calls the same code. See Firmware update.
 
 ### Power
 
@@ -401,6 +421,184 @@ current limit select and the voltage to ask for:
 - USER button: every note off (`panic`); during a bridge, ends the bridge.
 - BOOT button, held while the hub gets power: the ROM's USB DFU.
 
+## Firmware update
+
+Every tile and the hub take a new program through the hub's USB: a tile
+over the cables, wherever among the tiles it is, and the hub from its own
+console. `core/fw.h` and `core/fw.c` are the code, the same in both programs
+and in the bootloader. `tools/update.py` is the program on the computer.
+
+### What is in the flash
+
+256 KB in 2 KB sectors, a tile's and the hub's alike:
+
+| address | size | holds |
+|---|---|---|
+| 0x08000000 | 8 KB | the bootloader (`boot/`) |
+| 0x08002000 | 122 KB | slot A |
+| 0x08020800 | 122 KB | slot B |
+| 0x0803F000 | 2 KB | nothing |
+| 0x0803F800 | 2 KB | the settings record (Keys, "Flash") |
+
+A slot holds one program image and, in its last 16 bytes, a *trailer*. The
+program is linked twice, once for each slot's address, and a node is sent
+the image for the slot it does not run from. Nothing is ever copied from
+slot to slot, and the program that runs is never the one being written.
+
+An image is the program's binary. 0x200 bytes in, behind the vector table,
+is its header: magic "PIMG" (4), kind (1: 0 tile, 1 hub), 0 (1), version
+(2), the address it was linked for (4), its length (4). Its last four bytes
+are the CRC-32 of everything before them. An image is *whole* when the
+header fits the slot it is in, the checksum is right, its first word is a
+stack pointer in RAM and its second a start address inside the image.
+`tools/mkimage.py` fills in the length and the checksum after the link.
+
+The trailer is four words: magic "PTRL", sequence number, tried, ok. A word
+of flash can be written once after an erase, so a trailer only ever gains
+words, and the words it has say how far its image got:
+
+| state | trailer | means |
+|---|---|---|
+| NONE | erased | the image was put there from outside (ROM, SWD) |
+| PARTIAL | sequence number, no magic | being received, or that was cut short |
+| NEW | and the magic | received and checked, never started |
+| TRIED | and tried | the bootloader started it once |
+| GOOD | and ok | it ran and was confirmed |
+
+The sequence number is the running image's plus one: of two images, the
+higher is the newer. A word that is not erased counts as written whatever
+it reads, since the power may have gone while it was written.
+
+### The bootloader
+
+The chip starts in the bootloader after every reset. It looks which slots
+hold a whole image and starts the first of these:
+
+1. A NEW image, the newer of two, after writing its `tried` word. That
+   start is the image's *trial*, and the bootloader starts the watchdog
+   (about 4 s) before it: a program that hangs is restarted. If the word
+   cannot be written, the image is not started.
+2. A GOOD image, the newer of two.
+3. An image without a trailer.
+4. A TRIED image: nobody confirmed it, but it is better than no program.
+   (It still counts itself on trial, and restarts every minute until it is
+   confirmed. The network cannot bring a chip here; a programmer can.)
+5. The chip's ROM bootloader.
+
+A PARTIAL slot is never started, whatever is in it. So a new program gets
+one start before somebody confirms it: any restart during its trial, be it
+its own, its watchdog's or the power's, ends in the program that ran before.
+
+The bootloader has no pins and no clock but the 8 MHz the chip starts with.
+That one word is all it writes. It is not replaced through the hub.
+
+### Receiving a program
+
+The running program writes the other slot. For a tile these are the `CMD`
+operations 10 to 14; for the hub the console calls the same functions.
+
+- **Begin**, with the image's length. Erases the other slot's first sector
+  and its last, and writes the new sequence number into the trailer: from
+  here on the slot is PARTIAL. A program on trial answers busy: the other
+  slot is then the only program known to work.
+- **Write**, with an offset and 4 to 48 bytes, a multiple of 4. The offset
+  has to be the one the node wants next, and every reply says which that
+  is, so a sender that missed a reply knows where to go on. The slot's
+  other sectors are erased as the writes reach them. What was written is
+  read back. After an erase that failed the same write may be tried again;
+  after a write that failed the image is closed (the next offset is 0) and
+  has to be begun again.
+- **Commit.** The image is checked as a whole, and its kind and length
+  with it. Then the trailer's magic is written, the last word of all: the
+  image is NEW, and the bootloader starts it at the next restart. A commit
+  said twice answers ok.
+- **Confirm.** A running program that is on trial becomes GOOD. Any other
+  answers ok and changes nothing.
+- **Info**, 18 bytes: the running slot (1: 0 A, 1 B), its state (1: 0 NONE,
+  1 NEW, 2 TRIED, 3 GOOD, 4 PARTIAL), the other slot's state (1), flags (1:
+  bit 0 = the other slot holds a whole image, bit 1 = receiving, bit 2 = an
+  image was committed since this program started), the running image's
+  version (2) and CRC (4), the other image's CRC (4, 0 without a whole
+  image), and while receiving the offset wanted next (4).
+
+While flash is erased (18 ms a sector) or written the chip stands still, as
+it does for the settings record. A tile's program is nine sectors, and the
+trailer's sector makes ten.
+
+A program on trial says so in `INFO` (bit 4), reloads the watchdog every
+round of its main loop, and restarts when it has run for 60 s without a
+confirm. In its first second it answers `REBOOT` with busy: the hub says a
+command up to five times, and that `REBOOT` is the one that started the
+trial, said again. Obeyed, it would end the trial at once.
+
+A program that the bootloader did not start from a slot (one from before
+there was a bootloader) answers operations 10 to 14 with "no such
+operation".
+
+### The power, and the order of restarts
+
+The tiles have their power through the hub's two eFuses, and those are off
+while the hub's chip starts: their enables have pull-downs, and the program
+switches them on once it has looked at its inputs. So every restart of the
+hub is a power cut for every tile, and a tile that gets power starts in its
+bootloader:
+
+- a tile that holds a NEW image starts it, on trial;
+- a tile on trial is back in the program before;
+- a tile that was receiving has a PARTIAL slot, and runs what it ran.
+
+The update is built around this. First every node gets its image, and
+nothing restarts. Then, if the hub got one, the hub restarts, once, and
+every tile with it: all the trials begin together. Only when the hub got
+none are the tiles told to restart. A node on trial is never restarted on
+purpose.
+
+The same cut is the way back for the whole keyboard. A hub program that
+nobody confirms restarts after a minute (after 4 s, if it hangs) into the
+old one, and that restart ends every tile's trial too.
+
+The simulator plays this when a test sets `hub_feeds`: a hub that restarts,
+hangs or sits in its ROM takes every tile down, and they start afresh 300 ms
+after its program does.
+
+### tools/update.py
+
+1. Asks the hub for its tiles, and every tile and the hub what it runs.
+2. Reads the four images (tile and hub, slot A and slot B). A node gets the
+   one for the slot it does not run from; a node that runs this build
+   already gets nothing.
+3. Confirms what an earlier run left on trial, and takes away a program of
+   another build that waits in a slot for the next restart (by beginning a
+   new one there). Then sends each image, 48 bytes to a console line, and
+   checks that the node holds it as NEW.
+4. Restarts: `reboot hub` if the hub got a program, and then waits for the
+   hub's serial port and for every tile to be back. A tile that still runs
+   its old program with the new one waiting is told to restart (`reboot
+   all` when there are several and no tile is on trial, else by name), and
+   up to twice again, by name.
+5. If every node runs its new program, and every tile that was there
+   before is there again, within 45 s of the restart: confirms each one.
+   If not, it confirms nothing, and within a minute everything runs what it
+   ran before.
+
+A run that was cut off, wherever, is taken up by the next: an image that a
+node holds whole is not sent again, and a node that is trying this build is
+confirmed.
+
+### What it cannot reach
+
+A chip without the bootloader: a blank one, or one flashed with a plain
+program. Its first program is a *factory file* (`mkimage.py factory`): the
+bootloader, the image for slot A, and erased flash up to 0x0803F000, so
+that slot B and both trailers are empty afterwards and the settings stay.
+It goes in through the chip's ROM: the hub's over USB DFU, a tile's with
+`tools/flash_tile.py` through the hub's cable, which has to be in the tile's
+W or S port, with the tile's BOOT0 pads bridged if the chip is blank. After
+that the tile can be anywhere.
+
+The bootloader itself: it is 2 KB of code that should never have to change,
+and a network update of it could not be undone.
+
 ## The chip
 
 What `port/` and the two `main.c` do that the rest relies on. Every line of
@@ -412,22 +610,34 @@ it is untested.
 - UARTs send and receive by DMA: received bytes land in a ring that the main
   loop empties, so nothing is lost while an interrupt or a flash write holds
   the program up.
-- Restarting into the ROM bootloader: leave a mark in RAM that the start-up
-  code does not clear, reset, and jump to the boot memory (0x1FFFA400)
-  before anything is switched on. This follows Artery's note AN0008; the
-  address is from the datasheet and has not been tried.
+- A program starts at its slot's address, not at the start of the flash:
+  the bootloader loads the stack pointer and the start address from the
+  slot's first two words, and the program points the vector table register
+  at its own table before it enables an interrupt.
+- Restarting into the ROM bootloader: the program leaves a mark in RAM that
+  no start-up code clears, and resets. The bootloader finds the mark and
+  jumps to the boot memory (0x1FFFA400) before anything is switched on; it
+  goes there too when neither slot holds a program. This follows Artery's
+  note AN0008; the address is from the datasheet and has not been tried.
+- The watchdog runs only once the bootloader has started it for a trial:
+  the chip's slow oscillator, about 4 s, give or take a third. Nothing but
+  a reset stops it, so both main loops reload it every round.
+- Program flash is written through two functions that keep to the two
+  slots, and the one that erases refuses the slot the program runs from.
 - Before the hub restarts it unplugs itself from USB for 50 ms. The eFuses
-  go off with the reset (their pull-downs): the tiles lose power too.
+  go off with the reset (their pull-downs): the tiles lose power too. See
+  Firmware update, "The power, and the order of restarts".
 
 ## What is left for later
 
-- Flashing a tile through the hub on real hardware. `tools/flash_tile.py`
-  is the program for it: `bootloader <tile>`, `bridge`, then the ROM
-  bootloader's UART protocol (Artery's PM0005). It has run against the
-  simulator only; `README.md`, "Flash", says what that leaves open.
-- Updating a tile through other tiles. The ROM bootloader listens on the
-  tile's W and S ports only (USART2, USART3), so the hub's cable has to be
-  in one of those, and the bridge reaches no further than that tile, while
-  the hub's box hangs on a tile's E edge.
+- All of Firmware update on real hardware. The bootloader, the slots,
+  `tools/update.py` and `tools/flash_tile.py` have met the simulator only;
+  `README.md`, "Flash", says what that leaves open.
+- A blank tile's first program without touching the tile. It goes in
+  through the ROM bootloader, which listens on the tile's W and S ports
+  only (USART2, USART3) and starts with BOOT0 high, and the cable has no
+  BOOT0 wire: the pads have to be bridged once (unless a blank chip starts
+  its ROM by itself, which nobody has checked). A way to do that from the
+  cable would be a change to the tile's board.
 - More than one hub.
 - MPE and other tunings than twelve notes to the octave.

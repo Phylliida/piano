@@ -21,14 +21,22 @@ static sim_port_t *port_of(sim_t *s, int i, uint8_t p)
     return i == SIM_HUB ? &s->hub.port[0] : &s->tile[i].port[p];
 }
 
+/* Its program runs: it has power, is not in its ROM, and did not hang. */
 static bool running(const sim_node_t *n)
 {
-    return n->powered && !n->halted;
+    return n->powered && !n->halted && n->act != SIM_ACT_HANG;
 }
 
 static bool busy(const sim_t *s, const sim_node_t *n)
 {
     return s->t < n->busy_until;
+}
+
+/* The tiles' power goes through the hub, and the hub's switches are off:
+ * its program does not run, or has not got as far as switching one on. */
+static bool hub_dark(const sim_t *s)
+{
+    return s->hub_feeds && (!running(&s->hub.n) || s->t < s->feed_at);
 }
 
 static uint32_t local_ms(const sim_t *s, const sim_node_t *n)
@@ -51,32 +59,95 @@ static void ports_clear(sim_t *s, int i)
     }
 }
 
-/* The program starts: from flash if there is a record, with a clock that
- * starts anywhere. */
+/* ---- the program flash ---- */
+
+/* The node's program stands still for this long, after whatever it stands
+ * still for already. */
+static void flash_takes(sim_node_t *n, uint32_t steps)
+{
+    const sim_t *s = n->sim;
+
+    n->busy_until = (busy(s, n) ? n->busy_until : s->t) + steps;
+    n->flashing = true;
+}
+
+static bool chip_erase(void *ctx, uint32_t addr)
+{
+    sim_node_t *n = ctx;
+    fw_flash_t f = flashsim_flash(&n->chip);
+
+    flash_takes(n, SIM_FLASH_MS * SIM_STEPS_PER_MS);
+    return f.erase(f.ctx, addr);
+}
+
+static bool chip_program(void *ctx, uint32_t addr, const uint8_t *data, uint32_t len)
+{
+    sim_node_t *n = ctx;
+    fw_flash_t f = flashsim_flash(&n->chip);
+
+    flash_takes(n, len / 4u * SIM_WORD_STEPS);
+    return f.program(f.ctx, addr, data, len);
+}
+
+/* As the node comes from the factory: a program in slot A, the rest erased. */
+static void factory(sim_node_t *n, uint8_t kind)
+{
+    uint8_t image[SIM_FACTORY_LEN];
+
+    /* nothing here draws from the simulator's own random numbers */
+    flashsim_init(&n->chip, get32(n->uid));
+    flashsim_image(image, sizeof image, kind, FW_SLOT_A, FW_VERSION, SIM_ACT_RUN, get32(n->uid + 4));
+    flashsim_put(&n->chip, FW_SLOT_A, image, sizeof image);
+}
+
+/* The node starts: the bootloader picks a program, and that starts from
+ * the settings in flash if there is a record, with a clock that starts
+ * anywhere. */
 static void boot(sim_t *s, int i)
 {
     sim_node_t *n = node_of(s, i);
+    fw_flash_t chip = flashsim_flash(&n->chip);
+    fw_flash_t flash = { n->chip.mem, n, chip_erase, chip_program };
 
     n->powered = true;
     n->halted = false;
     n->boot_at = 0;
     n->busy_until = 0;
     n->saving = false;
+    n->flashing = false;
+    n->wdt_at = 0;
+    n->act = SIM_ACT_RUN;
+    ports_clear(s, i);
+
+    n->slot = fw_boot_choose(&chip, &n->trial);
+    if (n->slot == FW_NO_SLOT) {
+        n->halted = true;       /* no program: the ROM bootloader waits for one */
+        n->no_program++;
+        return;
+    }
+    n->act = flashsim_act(&n->chip, n->slot);
+    if (n->act == SIM_ACT_HANG) {
+        if (n->trial)
+            n->wdt_at = s->t + SIM_WDT_MS * SIM_STEPS_PER_MS;
+        return;
+    }
     n->clock = rng_next(&s->rng);
     if (s->wrap_ms)             /* its clock goes round to 0 this long after it starts */
         n->clock = 0u - s->wrap_ms - (uint32_t)(s->t / SIM_STEPS_PER_MS);
     n->phase = (uint8_t)rng_range(&s->rng, 0, SIM_STEPS_PER_MS - 1);
-    ports_clear(s, i);
 
     if (i == SIM_HUB) {
         hub_init(&s->hub.h, n->uid, n->have_flash ? s->hub.flash : NULL,
                  n->have_flash ? STORE_HUB_LEN : 0, local_ms(s, n));
+        hub_set_flash(&s->hub.h, &flash, n->slot);
         s->ntyped = 0;
+        s->feed_at = s->t + SIM_FEED_MS * SIM_STEPS_PER_MS;
     } else {
         sim_tile_t *st = &s->tile[i];
         st->scan = 0;
         tile_init(&st->t, n->uid, n->have_flash ? st->flash : NULL,
                   n->have_flash ? STORE_TILE_LEN : 0, SIM_SCAN_HZ, local_ms(s, n));
+        tile_set_flash(&st->t, &flash, n->slot);
     }
 }
 
@@ -86,11 +157,15 @@ static void stop(sim_t *s, int i)
 
     if (n->saving)
         n->have_flash = false;  /* cut off half way: the sector is erased or half written */
+    if (n->flashing && busy(s, n))
+        flashsim_cut(&n->chip); /* likewise what the program flash was doing */
     n->powered = false;
     n->halted = false;
     n->saving = false;
+    n->flashing = false;
     n->busy_until = 0;
     n->boot_at = 0;
+    n->wdt_at = 0;
     ports_clear(s, i);
 }
 
@@ -105,10 +180,33 @@ void sim_power(sim_t *s, int node, bool on)
 {
     sim_node_t *n = node_of(s, node);
 
-    if (!on)
+    n->off = !on;
+    if (!on) {
         stop(s, node);
-    else if (!n->powered && !n->boot_at)
+        return;
+    }
+    if (node != SIM_HUB && hub_dark(s))
+        return;                 /* feed() starts it */
+    if (!n->powered && !n->boot_at)
         n->boot_at = s->t + SIM_BOOT_MS * SIM_STEPS_PER_MS;
+}
+
+/* With hub_feeds: no tile has power while the hub's switches are off, and
+ * every tile that is not switched off starts when they are on. (Without:
+ * the switches are never off, and no tile is without power unless it is
+ * switched off.) */
+static void feed(sim_t *s)
+{
+    bool dark = hub_dark(s);
+
+    for (int i = 0; i < s->ntiles; i++) {
+        sim_node_t *n = &s->tile[i].n;
+
+        if (dark && (n->powered || n->boot_at))
+            stop(s, i);
+        else if (!dark && !n->off && !n->powered && !n->boot_at)
+            n->boot_at = s->t + SIM_BOOT_MS * SIM_STEPS_PER_MS;
+    }
 }
 
 static void uid_make(sim_t *s, uint8_t uid[12])
@@ -121,8 +219,10 @@ void sim_init(sim_t *s, uint32_t seed)
 {
     memset(s, 0, sizeof *s);
     rng_seed(&s->rng, seed);
+    s->hub.n.sim = s;
     s->hub.port[0].cable = -1;
     uid_make(s, s->hub.n.uid);
+    factory(&s->hub.n, KIND_HUB);
     boot(s, SIM_HUB);
 }
 
@@ -134,9 +234,11 @@ int sim_add_tile(sim_t *s)
     sim_tile_t *st = &s->tile[i];
 
     memset(st, 0, sizeof *st);
+    st->n.sim = s;
     for (uint8_t p = 0; p < TILE_PORTS; p++)
         st->port[p].cable = -1;
     uid_make(s, st->n.uid);
+    factory(&st->n, KIND_TILE);
     st->scan_phase = (uint8_t)rng_range(&s->rng, 0, SIM_SCAN_STEPS - 1);
     for (int k = 0; k < KEYS_N; k++) {
         int spread = (int)rng_range(&s->rng, 0, 2u * (unsigned)s->rest_spread) - s->rest_spread;
@@ -144,7 +246,8 @@ int sim_add_tile(sim_t *s)
         st->rest[k] = (uint16_t)(2000 + spread);
         st->swing[k] = (int16_t)(600 * (100 + pct) / 100);
     }
-    boot(s, i);
+    if (!hub_dark(s))           /* or else feed() starts it */
+        boot(s, i);
     return i;
 }
 
@@ -439,6 +542,8 @@ static void tick_hub(sim_t *s)
     uint8_t m[3], buf[256];
     size_t n;
 
+    if (s->hub.n.act == SIM_ACT_DEAF)
+        s->ntyped = 0;
     /* what was typed; the hub may leave some for later */
     if (s->ntyped) {
         n = hub_console_rx(h, (const uint8_t *)s->typed, s->ntyped, now);
@@ -487,6 +592,7 @@ void sim_type(sim_t *s, const char *text)
 static void step(sim_t *s)
 {
     s->t++;
+    feed(s);
 
     for (int i = SIM_HUB; i < s->ntiles; i++) {
         sim_node_t *n = node_of(s, i);
@@ -494,6 +600,14 @@ static void step(sim_t *s)
             boot(s, i);
         if (n->saving && s->t >= n->busy_until)
             save_end(s, i);
+        if (n->flashing && s->t >= n->busy_until)
+            n->flashing = false;
+        if (n->powered && n->wdt_at && s->t >= n->wdt_at) {
+            /* nobody fed the watchdog: the chip starts again */
+            stop(s, i);
+            n->wdt_resets++;
+            n->boot_at = s->t + SIM_BOOT_MS * SIM_STEPS_PER_MS;
+        }
     }
 
     /* the cables */
@@ -507,7 +621,7 @@ static void step(sim_t *s)
         sim_node_t *n = node_of(s, i);
         for (uint8_t p = 0; p < ports_of(i); p++) {
             sim_port_t *sp = port_of(s, i, p);
-            if (!running(n)) {
+            if (!running(n) || n->act == SIM_ACT_DEAF) {
                 sp->rx_len = 0;
             } else if (sp->rx_len && !busy(s, n)) {
                 if (i == SIM_HUB)
@@ -539,4 +653,9 @@ void sim_run(sim_t *s, uint32_t ms)
 {
     for (uint64_t n = (uint64_t)ms * SIM_STEPS_PER_MS; n; n--)
         step(s);
+}
+
+void sim_step(sim_t *s)
+{
+    step(s);
 }

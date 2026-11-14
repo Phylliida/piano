@@ -6,10 +6,15 @@
  *   tile_scan()   with each finished ADC scan,
  *   tile_tick()   about once a millisecond,
  *   tile_tx()     when a port's transmitter is free,
- *   tile_actions() after tile_tick(), for the things only hardware can do. */
+ *   tile_actions() after tile_tick(), for the things only hardware can do.
+ *
+ * One thing it does to hardware itself: a firmware update writes the new
+ * program to flash from inside tile_rx(), through the functions that
+ * tile_set_flash() was given. */
 #ifndef PIANO_TILE_H
 #define PIANO_TILE_H
 
+#include "fw.h"
 #include "keys.h"
 #include "node.h"
 #include "store.h"
@@ -19,7 +24,7 @@
 #define TILE_ACT_REBOOT      0x02u
 #define TILE_ACT_BOOTLOADER  0x04u  /* restart into the ROM bootloader */
 
-#define TILE_REPLY_MAX       6      /* counter, status, up to 4 bytes of data */
+#define TILE_REPLY_MAX       (2 + REPLY_MAX_DATA)   /* counter, status, data */
 
 typedef struct {
     node_t node;
@@ -49,12 +54,20 @@ typedef struct {
     uint8_t actions;            /* TILE_ACT_ bits not yet collected */
     uint8_t later;              /* TILE_ACT_REBOOT or _BOOTLOADER, due at later_at */
     uint32_t later_at;
+
+    fw_t fw;                    /* the program in flash, and the next one on its way in */
+    bool trial_over;            /* on trial for FW_TRIAL_MS, and nobody confirmed */
 } tile_t;
 
 /* uid: the chip's 96-bit ID. record: what flash holds (may be NULL or
  * rubbish: then defaults). */
 void tile_init(tile_t *t, const uint8_t uid[12], const uint8_t *record, size_t record_len,
                uint32_t scan_hz, uint32_t now);
+
+/* After tile_init(): the chip's flash and the slot this program runs from,
+ * for firmware updates (fw.h). A tile that is not told answers the update
+ * commands with ST_UNKNOWN. */
+void tile_set_flash(tile_t *t, const fw_flash_t *flash, uint8_t slot);
 
 void tile_rx(tile_t *t, uint8_t port, const uint8_t *data, size_t len, uint32_t now);
 void tile_scan(tile_t *t, uint32_t scan_no, const uint16_t adc[KEYS_N], uint32_t now);

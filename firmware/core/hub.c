@@ -616,6 +616,12 @@ void hub_init(hub_t *h, const uint8_t uid[12], const uint8_t *record, size_t rec
     /* Tiles forget the last hub's counters before this one's first beacon;
      * starting somewhere random is for the tile that did not. */
     h->counter = (uint8_t)rng_next(&h->node.rng);
+    fw_init(&h->fw, NULL, KIND_HUB, FW_NO_SLOT);
+}
+
+void hub_set_flash(hub_t *h, const fw_flash_t *flash, uint8_t slot)
+{
+    fw_init(&h->fw, flash, KIND_HUB, slot);
 }
 
 void hub_rx(hub_t *h, const uint8_t *data, size_t len, uint32_t now)
@@ -672,5 +678,12 @@ void hub_tick(hub_t *h, uint32_t now)
     if (h->later && reached(now, h->later_at)) {
         h->actions |= h->later;
         h->later = 0;
+    }
+
+    /* A new program that nobody confirmed: the computer cannot talk to it,
+     * or does not like what it sees. Back to the one before. */
+    if (h->fw.trial && !h->trial_over && since(now, h->started) >= FW_TRIAL_MS) {
+        h->trial_over = true;
+        h->actions |= HUB_ACT_REBOOT;
     }
 }

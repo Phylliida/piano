@@ -149,13 +149,22 @@ uint16_t crc16_ccitt(const uint8_t *data, size_t n)
     return crc;
 }
 
+/* Four bits at a time: the bootloader checks a whole program with this at
+ * every start, on the chip's slow clock. */
 uint32_t crc32_ieee(const uint8_t *data, size_t n)
 {
+    static const uint32_t step[16] = {
+        0x00000000u, 0x1DB71064u, 0x3B6E20C8u, 0x26D930ACu,
+        0x76DC4190u, 0x6B6B51F4u, 0x4DB26158u, 0x5005713Cu,
+        0xEDB88320u, 0xF00F9344u, 0xD6D6A3E8u, 0xCB61B38Cu,
+        0x9B64C2B0u, 0x86D3D2D4u, 0xA00AE278u, 0xBDBDF21Cu,
+    };
     uint32_t crc = 0xFFFFFFFFu;
+
     for (size_t i = 0; i < n; i++) {
         crc ^= data[i];
-        for (int b = 0; b < 8; b++)
-            crc = (crc & 1u) ? (crc >> 1) ^ 0xEDB88320u : crc >> 1;
+        crc = (crc >> 4) ^ step[crc & 15u];
+        crc = (crc >> 4) ^ step[crc & 15u];
     }
     return ~crc;
 }

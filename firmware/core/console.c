@@ -135,6 +135,10 @@ static void show_flags(hub_t *h, const hub_tile_t *t)
         hub_print(h, " calibrating");
     if (t->flags & INFO_RAW)
         hub_print(h, " raw");
+    if (t->flags & INFO_TRIAL)
+        hub_print(h, " trial");
+    if (t->flags & INFO_STAGED)
+        hub_print(h, " staged");
     if (t->silent)
         hub_print(h, " silent");
     if (t->cols != KEYS_COLS || t->rows != KEYS_ROWS)
@@ -163,6 +167,9 @@ static const char *cmd_help(hub_t *h, char **args)
         "bootloader hub|<tile> [quiet ms]",
         "bridge <baud> [n|e|o] [straight|swapped]",
         "                                the serial port becomes a UART on the cable",
+        "fw <tile|all|hub>               the program it runs, and what its other slot holds",
+        "fw <tile|hub> begin <length> | write <offset> <hex> | commit",
+        "fw <tile|all|hub> confirm       a new program, as tools/update.py sends it",
         "a tile is its number in `tiles`, its place `u,v`, or its 8-digit ID",
     };
 
@@ -517,12 +524,45 @@ static const char *job(hub_t *h, char *who, uint8_t kind, uint8_t op, const uint
     return LATER;
 }
 
+static const char *fw_state_name(uint8_t state)
+{
+    static const char *const name[] = {
+        [FW_NONE] = "none", [FW_NEW] = "new", [FW_TRIED] = "tried", [FW_GOOD] = "good",
+        [FW_PARTIAL] = "partial",
+    };
+
+    return state < sizeof name / sizeof name[0] ? name[state] : "?";
+}
+
+/* What fw_info() said, a tile's or the hub's own:
+ * "runs a good 0001 1a2b3c4d, other new 55667788, staged". */
+static void show_fw(hub_t *h, const uint8_t *d)
+{
+    hub_print(h, "runs %c %s %04x %08x, other %s ", d[0] == FW_SLOT_B ? 'b' : 'a',
+              fw_state_name(d[1]), get16(d + 4), (unsigned)get32(d + 6), fw_state_name(d[2]));
+    if (d[3] & FW_F_OTHER_VALID)
+        hub_print(h, "%08x", (unsigned)get32(d + 10));
+    else
+        hub_print(h, "-");
+    if (d[3] & FW_F_OPEN)
+        hub_print(h, ", receiving at %u", (unsigned)get32(d + 14));
+    if (d[3] & FW_F_STAGED)
+        hub_print(h, ", staged");
+    end_line(h);
+}
+
 void console_reply(hub_t *h, const hub_tile_t *t, uint8_t status, const uint8_t *data, uint8_t n)
 {
     int ix = index_of(h, t);
 
     if (status != ST_OK) {
-        hub_say(h, "tile %d: %s", ix, console_status_name(status));
+        /* a write or a commit that was refused says where the tile is, so
+         * the sender can go on from there */
+        if (h->job.kind == JOB_FW_AT && n >= 4)
+            hub_say(h, "tile %d: %s, at %u", ix, console_status_name(status),
+                    (unsigned)get32(data));
+        else
+            hub_say(h, "tile %d: %s", ix, console_status_name(status));
         return;
     }
     switch (h->job.kind) {
@@ -537,6 +577,16 @@ void console_reply(hub_t *h, const hub_tile_t *t, uint8_t status, const uint8_t 
     case JOB_CAL_STOP:
         if (n >= 1)
             hub_say(h, "tile %d: %u of %d keys measured", ix, data[0], KEYS_N);
+        break;
+    case JOB_FW_INFO:
+        if (n >= FW_INFO_LEN) {
+            hub_print(h, "tile %d: ", ix);
+            show_fw(h, data);
+        }
+        break;
+    case JOB_FW_AT:
+        if (h->job.op == OP_FW_WRITE && n >= 4)
+            hub_say(h, "tile %d: at %u", ix, (unsigned)get32(data));
         break;
     default:
         break;
@@ -764,6 +814,103 @@ static const char *cmd_bridge(hub_t *h, char **args)
     return NULL;
 }
 
+/* -------------------------------------------------------- firmware update --- */
+
+/* `fw hub ...`: the hub's own program. The same five things a tile does
+ * when it is sent the command, done here and now; the lines read the same. */
+static const char *fw_hub(hub_t *h, uint8_t op, const uint8_t *arg, uint8_t n)
+{
+    uint8_t info[FW_INFO_LEN], status;
+    uint32_t next = 0;
+    bool at = false;
+
+    if (h->fw.slot == FW_NO_SLOT) {
+        status = ST_UNKNOWN;
+    } else if (op == OP_FW_INFO) {
+        fw_info(&h->fw, info);
+        hub_print(h, "hub: ");
+        show_fw(h, info);
+        return NULL;
+    } else if (op == OP_FW_BEGIN) {
+        status = fw_begin(&h->fw, get32(arg));
+    } else if (op == OP_FW_WRITE) {
+        status = fw_write(&h->fw, get32(arg), arg + 4, (uint8_t)(n - 4), &next);
+        at = true;
+    } else if (op == OP_FW_COMMIT) {
+        status = fw_commit(&h->fw, &next);
+        at = status != ST_OK;
+    } else {
+        status = fw_confirm(&h->fw);
+    }
+
+    if (status == ST_OK) {
+        if (at)
+            hub_say(h, "hub: at %u", (unsigned)next);
+        return NULL;
+    }
+    if (at)
+        hub_say(h, "hub: %s, at %u", console_status_name(status), (unsigned)next);
+    else
+        hub_say(h, "hub: %s", console_status_name(status));
+    return "1 failed";
+}
+
+static const char *cmd_fw(hub_t *h, char **args)
+{
+    static const char usage[] =
+        "usage: fw <tile|all|hub> [begin <length> | write <offset> <hex> | commit | confirm]";
+    char *who = word(args);
+    const char *what = word(args);
+    uint8_t arg[CMD_MAX_ARGS], n = 0, op, kind = JOB_PLAIN;
+    int32_t x;
+
+    if (!who)
+        return usage;
+    if (!what) {
+        op = OP_FW_INFO;
+        kind = JOB_FW_INFO;
+    } else if (!strcmp(what, "begin")) {
+        if (!number(word(args), &x) || x < 0)
+            return usage;
+        op = OP_FW_BEGIN;
+        put32(arg, (uint32_t)x);
+        n = 4;
+    } else if (!strcmp(what, "write")) {
+        const char *offset = word(args), *hex = word(args);
+        size_t digits = hex ? strlen(hex) : 0;
+
+        if (!number(offset, &x) || x < 0 || !hex)
+            return usage;
+        if (digits == 0 || digits % 8 || digits > 2 * FW_CHUNK)
+            return "write takes 4 to 48 bytes, a multiple of 4, as hex digits";
+        for (size_t i = 0; i < digits; i += 2) {
+            int hi = hex_digit(hex[i]), lo = hex_digit(hex[i + 1]);
+            if (hi < 0 || lo < 0)
+                return "write takes 4 to 48 bytes, a multiple of 4, as hex digits";
+            arg[4 + i / 2] = (uint8_t)(hi << 4 | lo);
+        }
+        op = OP_FW_WRITE;
+        kind = JOB_FW_AT;
+        put32(arg, (uint32_t)x);
+        n = (uint8_t)(4 + digits / 2);
+    } else if (!strcmp(what, "commit")) {
+        op = OP_FW_COMMIT;
+        kind = JOB_FW_AT;
+    } else if (!strcmp(what, "confirm")) {
+        op = OP_FW_CONFIRM;
+    } else {
+        return usage;
+    }
+
+    if (!strcmp(who, "hub"))
+        return fw_hub(h, op, arg, n);
+    /* a program is built for the slot it goes into, and that is the one
+     * the tile does not run from: not the same for every tile */
+    if (!strcmp(who, "all") && op != OP_FW_INFO && op != OP_FW_CONFIRM)
+        return "a new program goes to one tile at a time";
+    return job(h, who, kind, op, arg, n);
+}
+
 /* ------------------------------------------------------------------ power --- */
 
 static const char *cmd_power(hub_t *h, char **args)
@@ -858,6 +1005,7 @@ static const struct {
     { "reboot", cmd_reboot },
     { "bootloader", cmd_bootloader },
     { "bridge", cmd_bridge },
+    { "fw", cmd_fw },
 };
 
 void console_line(hub_t *h, char *line)

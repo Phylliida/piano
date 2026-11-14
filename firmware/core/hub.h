@@ -15,11 +15,16 @@
  *   power_step(&hub.power, ...) with the board's measurements.
  *
  * hub.c holds the table, the frames and the command jobs; grid.c the
- * layout; console.c the text. */
+ * layout; console.c the text.
+ *
+ * A firmware update (fw.h) goes through the console: `fw <tile> ...` sends
+ * a tile its new program piece by piece, `fw hub ...` writes the hub's own
+ * into flash, from inside hub_console_rx(). */
 #ifndef PIANO_HUB_H
 #define PIANO_HUB_H
 
 #include "ch224.h"
+#include "fw.h"
 #include "node.h"
 #include "notes.h"
 #include "power.h"
@@ -28,7 +33,7 @@
 #define HUB_MAX_TILES    32
 #define HUB_MIDI_LEN     256    /* MIDI messages waiting for USB */
 #define HUB_OUT_LEN      4096   /* console characters waiting for USB */
-#define HUB_LINE_MAX     95     /* the longest command line */
+#define HUB_LINE_MAX     159    /* the longest command line: `fw <tile> write` is 121 */
 #define HUB_PROBLEMS     8      /* cables that do not fit the grid, remembered */
 #define HUB_KEY_BYTES    ((KEYS_N + 7) / 8)
 
@@ -81,14 +86,18 @@ typedef struct {
 } hub_problem_t;
 
 /* What a console command that talks to tiles is doing. */
-enum { JOB_NONE, JOB_PLAIN, JOB_PING, JOB_GET, JOB_CAL_STOP };     /* what to print for a reply */
+enum {                          /* what to print for a reply */
+    JOB_NONE, JOB_PLAIN, JOB_PING, JOB_GET, JOB_CAL_STOP,
+    JOB_FW_INFO,                /* what fw_info() gave */
+    JOB_FW_AT,                  /* how far the tile has got with a new program */
+};
 enum { STAGE_TILES, STAGE_FLASH };
 
 typedef struct {
     uint8_t kind;               /* JOB_NONE: the console is free */
     uint8_t stage;
     uint8_t op;
-    uint8_t arg[5];
+    uint8_t arg[CMD_MAX_ARGS];
     uint8_t arg_len;
     uint8_t param;              /* JOB_GET: which parameter */
 
@@ -100,7 +109,7 @@ typedef struct {
     bool replied;
     uint8_t counter, tries;
     uint32_t first_sent, sent_at;
-    uint8_t reply[1 + 4];       /* status, data */
+    uint8_t reply[1 + REPLY_MAX_DATA];  /* status, data */
     uint8_t reply_len;
     uint32_t took;              /* ms from the first copy to the reply */
 
@@ -172,6 +181,9 @@ typedef struct {
     hub_bridge_t bridge;
     bool bridging;
 
+    fw_t fw;                    /* the hub's own program, and a new one on its way in */
+    bool trial_over;            /* nobody confirmed this program in time: restart asked for */
+
     power_t power;
     ch224_t pd;                 /* the port sets this up and polls it; the console shows it */
     hub_stats_t stats;
@@ -181,6 +193,13 @@ typedef struct {
  * rubbish: then defaults). */
 void hub_init(hub_t *h, const uint8_t uid[12], const uint8_t *record, size_t record_len,
               uint32_t now);
+
+/* Where the hub's program lives, for `fw hub`: call it after hub_init().
+ * slot: the one this program runs from. Without this call the hub answers
+ * `fw hub` with "does not know that". A program that runs on trial (fw.h)
+ * asks for HUB_ACT_REBOOT when nobody has typed `fw hub confirm` within
+ * FW_TRIAL_MS. */
+void hub_set_flash(hub_t *h, const fw_flash_t *flash, uint8_t slot);
 
 void hub_rx(hub_t *h, const uint8_t *data, size_t len, uint32_t now);
 void hub_tick(hub_t *h, uint32_t now);

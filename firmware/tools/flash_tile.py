@@ -5,11 +5,16 @@ A tile has no USB socket. Its chip has a bootloader in ROM that takes a
 program over a UART, and the hub's console can become a plain UART on the
 hub's cable (`bridge`). This script drives both:
 
-    python3 tools/flash_tile.py              flashes build/tile/tile.bin
+    python3 tools/flash_tile.py              flashes build/tile/tile_factory.bin
     python3 tools/flash_tile.py other.bin
     python3 tools/flash_tile.py --check      only looks: the hub, the tile, the file
     python3 tools/flash_tile.py --rom        for a tile put into its ROM by hand
     python3 tools/flash_tile.py --help       the other options
+
+This is for a tile's first program, and for a tile beyond other help. A
+tile that runs gets a new program from tools/update.py, which needs neither
+the ROM nor the tile on the hub's own cable, and which a program that turns
+out not to work cannot lock out.
 
 NOT TRIED ON HARDWARE. tests/test_flash_tile.py (`make test-tools`) runs it
 against the hub's own program in the simulator (tests/hubsim.c), and
@@ -27,10 +32,18 @@ What it does:
     the hub and every other tile keep off the cables for that long.
  3. `bridge 115200 e straight`, then 0x7F, which the ROM measures the speed
     by. If nothing answers, the same with `swapped`.
- 4. Erases the 2 KB sectors the program covers, writes the program, reads
-    it back and compares, and restarts the tile.
- 5. Ends the bridge (it lets go of DTR for a moment) and waits until the
-    hub sees the tile again.
+ 4. Erases the 2 KB sectors the file covers, writes it, reads it back and
+    compares, and restarts the tile.
+ 5. Ends the bridge (it lets go of DTR for a moment), waits until the hub
+    sees the tile again, and asks the tile which program it runs.
+
+The file is a factory file (tools/mkimage.py): the whole chip up to the
+tile's settings, with the bootloader, the program in the first of its two
+slots, and nothing in the second. So step 4 erases all of that, and a
+program that was there before cannot be started in place of the new one.
+The blank part is not written, and where nothing was written only the two
+ends of every sector are read back: where a program would begin, and where
+a slot keeps its notes.
 
 It flashes one tile: the one the hub's cable is plugged into. The bridge
 reaches no further, and the ROM bootloader listens on two of the tile's four
@@ -40,7 +53,10 @@ cable is in and stops, before anything is changed, if it is N or E.
 What it never does: erase or write the last 2 KB of flash (0x0803F800,
 where a tile keeps its settings and calibration), erase everything at once,
 or touch the chip's protection settings. It refuses a file that is not a
-program for this chip, and the hub's program.
+program for this chip, the hub's files, and a program built for one of the
+two slots (tile_a.img, tile_b.img: those are update.py's). It does take a
+plain program for the start of flash that is no factory file; a tile with
+such a program and no bootloader takes no update through the hub.
 
 `--rom` is for a tile that cannot be sent into its ROM from the console: a
 blank one, or one whose program does not get there. The script first makes
@@ -66,6 +82,8 @@ import struct
 import sys
 import time
 
+import mkimage
+
 FLASH_BASE = 0x08000000
 SECTOR = 2048                   # AT32F405xC: 128 sectors of 2 KB
 RECORD_BASE = 0x0803F800        # the last sector: settings and calibration
@@ -73,6 +91,7 @@ RECORD_SECTOR = (RECORD_BASE - FLASH_BASE) // SECTOR
 RAM_BASE = 0x20000000
 RAM_END = 0x20019800            # 102 KB
 BLOCK = 256                     # the most one Read or Write Memory carries
+PROBE = 16                      # read at either end of a sector nothing was written to
 
 # The chip's ID as the reference manual has it (DEBUG_IDCODE).
 CHIPS = {
@@ -105,7 +124,8 @@ DTR_LOW = 0.05
 BRIDGE_END = 0.15       # the hub drops what was typed while a bridge ends
 SYNC_WAIT = 0.3
 SYNC_TRIES = 3
-RUB_OUT = 96            # backspaces: more than the console's longest line (95)
+RUB_OUT = 176           # backspaces: more than the console's longest line
+                        # (core/hub.h: HUB_LINE_MAX, 159)
 QUIET_LEAD = 0.05       # the hub itself falls silent 20 ms after it takes `quiet`
 QUIET_MAX = 67.0        # the longest quiet there is, and a little
 NOBODY_WAIT = 2.0       # a hub that has only just got its power hears its tile
@@ -152,7 +172,8 @@ def xor(data):
 # ------------------------------------------------------------ the program ---
 
 def load_image(path):
-    """The program to flash, checked and padded to whole words."""
+    """The file to flash, checked and padded to whole words: a factory file,
+    or a plain program for the start of flash."""
     try:
         with open(path, "rb") as f:
             data = f.read()
@@ -167,6 +188,20 @@ def load_image(path):
     if len(data) > RECORD_BASE - FLASH_BASE:
         raise Failure(f"{path} is {len(data)} bytes; a tile's program has room for "
                       f"{RECORD_BASE - FLASH_BASE} (the last sector is the tile's settings)")
+    if mkimage.header(data) is not None:
+        raise Failure(f"{path} is a program for one of the two slots behind the bootloader.\n"
+                      "A running tile gets those through the hub: tools/update.py. What this\n"
+                      "script flashes is the factory file, build/tile/tile_factory.bin")
+    if len(data) == mkimage.FACTORY_LEN:
+        try:
+            program = mkimage.parse_factory(data)
+        except mkimage.Bad as e:
+            raise Failure(f"{path} has the size of a factory file and is not a whole one: "
+                          f"{e}") from None
+        if mkimage.kind_name(program.kind) != "tile":
+            raise Failure(f"{path} is the {mkimage.kind_name(program.kind)}'s factory file, "
+                          "not a tile's")
+        return data
     stack, start = struct.unpack_from("<II", data)
     if not (RAM_BASE < stack <= RAM_END and stack % 4 == 0):
         raise Failure(f"{path} is not a program for this chip: its first word, the stack "
@@ -179,13 +214,49 @@ def load_image(path):
     return data + b"\xff" * (-len(data) % 4)
 
 
-def flash_time(size, baud):
+def factory_program(image):
+    """The program in a factory file, as mkimage.Image; None for a plain
+    program."""
+    if len(image) != mkimage.FACTORY_LEN:
+        return None
+    return mkimage.parse_factory(image)
+
+
+def plan(image):
+    """How `image` gets into the flash: how many sectors are erased, the
+    blocks that are written, as (offset, bytes), and the pieces that are
+    read back, as (offset, length).
+
+    A factory file is mostly 0xFF: it covers the whole chip so that all of
+    it is erased. A blank block is not written. Of a sector that nothing is
+    written to, the two ends are read back: a program left there begins at
+    a sector's first byte, and a slot's trailer is its last sector's end."""
+    sectors = -(-len(image) // SECTOR)
+    writes = [(at, image[at:at + BLOCK]) for at in range(0, len(image), BLOCK)
+              if image[at:at + BLOCK].strip(b"\xff")]
+    busy = {at // SECTOR for at, _ in writes}
+    reads = []
+    for s in range(sectors):
+        a, b = s * SECTOR, min((s + 1) * SECTOR, len(image))
+        if s in busy:
+            reads += [(at, min(BLOCK, b - at)) for at in range(a, b, BLOCK)]
+        elif b - a <= 2 * PROBE:
+            reads.append((a, b - a))
+        else:
+            reads += [(a, PROBE), (b - PROBE, PROBE)]
+    return sectors, writes, reads
+
+
+def flash_time(image, baud):
     """A guess at how long erasing, writing and reading back take, in
     seconds: the bytes on the wire, and a few USB round trips per block."""
-    blocks = -(-size // BLOCK)
-    sectors = -(-size // SECTOR)
-    wire = (BLOCK + 10) * 11.0 / baud
-    return 1.0 + sectors * 0.03 + blocks * (wire + 0.030) + blocks * (wire + 0.015)
+    sectors, writes, reads = plan(image)
+
+    def wire(n):
+        return (n + 10) * 11.0 / baud
+
+    return (1.0 + sectors * 0.03 + sum(wire(len(data)) + 0.030 for _, data in writes)
+            + sum(wire(n) + 0.015 for _, n in reads))
 
 
 # -------------------------------------------------------- the serial port ---
@@ -870,8 +941,8 @@ def identify(rom, opt, out):
 
 
 def write_program(rom, image, opt, out):
-    """Erase what the program covers, write it, read it back."""
-    sectors = -(-len(image) // SECTOR)
+    """Erase what the file covers, write it, read it back."""
+    sectors, writes, reads = plan(image)
     began = now()
     for s in range(sectors):
         out.progress(f"erasing sector {s + 1} of {sectors}")
@@ -880,10 +951,15 @@ def write_program(rom, image, opt, out):
             f"0x{FLASH_BASE + sectors * SECTOR - 1:08x} ({now() - began:.1f} s)")
 
     began = now()
-    for at in range(0, len(image), BLOCK):
-        out.progress(f"writing {at} of {len(image)} bytes")
-        rom.write(FLASH_BASE + at, image[at:at + BLOCK])
-    out.say(f"wrote {len(image)} bytes ({now() - began:.1f} s)")
+    total = sum(len(data) for _, data in writes)
+    done = 0
+    for at, data in writes:
+        out.progress(f"writing {done} of {total} bytes")
+        rom.write(FLASH_BASE + at, data)
+        done += len(data)
+    blank = len(image) - total
+    out.say(f"wrote {total} bytes" + (f"; the other {blank} are blank" if blank else "")
+            + f" ({now() - began:.1f} s)")
 
     if not opt.verify:
         out.say("not read back (--no-verify)")
@@ -891,16 +967,21 @@ def write_program(rom, image, opt, out):
     # Only now, when every block is written: a ROM that erased more than it
     # was asked to would show here and not block by block.
     began = now()
-    for at in range(0, len(image), BLOCK):
-        out.progress(f"reading back {at} of {len(image)} bytes")
-        want = image[at:at + BLOCK]
-        got = rom.read(FLASH_BASE + at, len(want))
+    for i, (at, n) in enumerate(reads):
+        out.progress(f"reading back, piece {i + 1} of {len(reads)}")
+        want = image[at:at + n]
+        got = rom.read(FLASH_BASE + at, n)
         if got != want:
             i = next(i for i in range(len(want)) if got[i] != want[i])
             raise Failure(f"what the flash holds is not what was written: at "
                           f"0x{FLASH_BASE + at + i:08x} it reads 0x{got[i]:02x}, the program "
                           f"has 0x{want[i]:02x}")
-    out.say(f"read back {len(image)} bytes: the same ({now() - began:.1f} s)")
+    looked = sum(n for _, n in reads)
+    if looked == len(image):
+        out.say(f"read back {looked} bytes: the same ({now() - began:.1f} s)")
+    else:
+        out.say(f"read back {looked} bytes, what was written and both ends of every blank "
+                f"sector: the same ({now() - began:.1f} s)")
 
 
 def restart(rom, how, out):
@@ -956,6 +1037,33 @@ def wait_back(hub, before, since, wait, out):
         sleep(0.25)
 
 
+def check_runs(hub, tile, program, out):
+    """After a factory file: the tile says which program it runs, and that
+    has to be the file's. A program left over in the second slot, which the
+    bootloader took for the newer one, would show here."""
+    try:
+        lines = hub.ask(f"fw {tile.id}", 4.0)
+    except HubError as e:
+        out.say("which program the tile runs could not be asked: "
+                + "; ".join(e.lines + [e.text]))
+        return
+    except NoAnswer:
+        raise Failure("the hub's console stopped answering") from None
+    for text in lines:
+        m = re.fullmatch(r"tile \d+: runs ([ab]) \w+ ([0-9a-f]{4}) ([0-9a-f]{8}), other .*", text)
+        if not m:
+            continue
+        slot, version, crc = m.group(1).upper(), m.group(2), m.group(3)
+        if (slot, crc) != ("A", f"{program.crc:08x}"):
+            raise Failure("the tile is back, but it runs another program than the one just "
+                          f"flashed:\nthe one in slot {slot}, version {version}, crc {crc}. "
+                          f"The file's is for slot A, version\n{program.version:04x}, crc "
+                          f"{program.crc:08x}.")
+        out.say(f"it runs what was flashed: slot A, version {version}, crc {crc}")
+        return
+    out.say("which program the tile runs could not be asked: the hub said nothing of it")
+
+
 IN_ROM = """\
 The tile may be in its ROM bootloader now, where the hub does not see it. Its
 program was not changed. To get it back, restart it: plug its cable in again,
@@ -995,13 +1103,21 @@ def flash(port, image, opt, out, prompt):
                       "program does not start, has to be put into its ROM bootloader by hand:\n"
                       "see --rom.")
 
+    program = factory_program(image)
     sectors = -(-len(image) // SECTOR)
     out.say(f"program: {opt.image}, {len(image)} bytes, {sectors} sectors of flash")
+    if program:
+        out.say(f"a factory file: the bootloader, and in slot A the tile's program, version "
+                f"{program.version:04x}, crc {program.crc:08x}")
+    else:
+        out.say(f"not a factory file: it goes to 0x{FLASH_BASE:08x} as it is. Without the "
+                "bootloader there, the\ntile takes no new program through the hub afterwards "
+                "(tools/update.py)")
     if opt.check:
         out.say("--check: nothing was changed")
         return
 
-    guess = flash_time(len(image), opt.baud)
+    guess = flash_time(image, opt.baud)
     if opt.quiet_ms:
         quiet_ms = opt.quiet_ms
     elif opt.rom:
@@ -1057,11 +1173,13 @@ def flash(port, image, opt, out, prompt):
     if back is None:
         raise Failure(NOT_BACK.format(checked=" and read back" if opt.verify else ""))
     out.say(f"tile {back.id} is back, firmware {back.firmware}")
+    if program:
+        check_runs(hub, back, program, out)
 
 
 def parse(argv):
     here = os.path.dirname(os.path.abspath(__file__))
-    image = os.path.normpath(os.path.join(here, "..", "build", "tile", "tile.bin"))
+    image = os.path.normpath(os.path.join(here, "..", "build", "tile", "tile_factory.bin"))
     try:
         image = os.path.relpath(image)
     except ValueError:
@@ -1071,7 +1189,7 @@ def parse(argv):
         epilog="The top of this file says what it does, step by step, and what has "
                "not been tried.")
     p.add_argument("image", nargs="?", default=image,
-                   help=f"the tile's program as a plain binary (default: {image})")
+                   help=f"the tile's factory file: bootloader and program (default: {image})")
     p.add_argument("--port", help="the hub's serial port (default: found by its USB ID)")
     p.add_argument("--check", action="store_true",
                    help="look at the hub, the tile and the file, and change nothing")

@@ -16,7 +16,7 @@ serial console with the raw key data.
 | tile PCB | routed, DRC clean, not ordered yet. [`pcb/README.md`](pcb/README.md) lists what to verify before ordering |
 | tile case | printed once (2026-11-13): mostly good, but the tray warps a little when the bottom cover goes in. The cover and board need about 1 mm more room; not changed yet |
 | hub | circuit and schematic done ([`hub/`](hub/)); board not routed, case not designed |
-| firmware | tile and hub programs written and tested on a PC, never run on hardware: no board exists yet. [`firmware/README.md`](firmware/README.md) |
+| firmware | tile and hub programs written and tested on a PC, never run on hardware: no board exists yet. Every tile and the hub take new programs through the hub's USB, also only on a PC so far. [`firmware/README.md`](firmware/README.md) |
 
 ## Where things are
 
@@ -29,7 +29,7 @@ serial console with the raw key data.
 | `pcb/` | the KiCad project, and its README with the pin map for the firmware |
 | `gen_case.py` | builds the printed case from `tilegeom.py` |
 | `hub_circuit.py`, `gen_hub_lib.py`, `gen_hub_sch.py`, `hub/` | the hub's circuit as data, its KiCad library and schematic |
-| `firmware/` | the tile's and the hub's programs, their tests, and the script that flashes a tile through the hub |
+| `firmware/` | the tile's and the hub's programs, the bootloader, their tests, and the scripts that put programs on every tile and the hub through the hub |
 | `cad/` | its output: STLs ready to print, and two drawings |
 | `HE60_NOTES.md` | notes on the sensing chain (sections 1 to 5) |
 

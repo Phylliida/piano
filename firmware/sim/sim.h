@@ -3,9 +3,9 @@
  *
  * Time moves in steps of 100 us. In one step a transmitter at 1 Mbaud sends
  * 10 bytes, one frame straight after another; a tile scans its keys every
- * 5 steps; every node's program is ticked every 10. Each node has its own clock, started at a random value
- * when the node starts, as real ones do: nothing in the protocol may compare
- * one node's time with another's.
+ * 5 steps; every node's program is ticked every 10. Each node has its own
+ * clock, started at a random value when the node starts, as real ones do:
+ * nothing in the protocol may compare one node's time with another's.
  *
  * What the simulator does that the real port code has to do too:
  *   - a port's pins change over (link.swapped) only between two frames;
@@ -13,10 +13,31 @@
  *     frame being sent goes on, and what arrives waits in a buffer;
  *   - REBOOT starts the program again from what is in flash.
  *
+ * Every node has its program flash too (flashsim.h), with a program in slot
+ * A as it comes from the factory. A start goes through the bootloader's
+ * choice (fw_boot_choose): the node runs the slot that says, on trial or
+ * not, and with nothing to start it sits in its ROM. The program that runs
+ * is always this PC's tile.c or hub.c; the image in the slot only says how
+ * it behaves (SIM_ACT_): a hanging one stands still until the watchdog the
+ * bootloader started for a trial restarts the node, a deaf one runs and
+ * hears nothing. Erasing and writing the program flash takes time like the
+ * settings do, and power that goes meanwhile leaves the last operation
+ * half done.
+ *
+ * Where the tiles' power comes from is the test's choice (sim_t.hub_feeds).
+ * As the simulator starts, every node has power of its own, and a hub that
+ * restarts leaves its tiles running. On the real boards the power goes
+ * through the hub, whose two switches are off while its chip starts: with
+ * hub_feeds a hub that restarts, hangs or sits in its ROM takes every tile
+ * down, and they start afresh when its program feeds them again. What
+ * decides between the hub's two inputs (core/power.c) is not part of this:
+ * tests/test_power.c.
+ *
  * Tests reach into the structs: s.hub.h is the hub, s.tile[i].t a tile. */
 #ifndef PIANO_SIM_H
 #define PIANO_SIM_H
 
+#include "flashsim.h"
 #include "hub.h"
 #include "tile.h"
 
@@ -29,8 +50,13 @@
 #define SIM_STEP_BYTES    10    /* 1 Mbaud, 10 bits to the byte */
 #define SIM_SCAN_STEPS    5
 #define SIM_SCAN_HZ       2000u
-#define SIM_FLASH_MS      40    /* erasing and writing the record */
+#define SIM_FLASH_MS      40    /* erasing and writing the record; erasing a sector of program */
+#define SIM_WORD_STEPS    1     /* writing four bytes of program: 100 us */
+#define SIM_WDT_MS        4000  /* the watchdog a program on trial runs under */
+#define SIM_FACTORY_LEN   4096  /* the program a node comes with */
 #define SIM_BOOT_MS       20    /* from reset to the program's first line */
+#define SIM_FEED_MS       300   /* from the hub's program's first line to power for the
+                                 * tiles: the computer has to set its USB up first */
 #define SIM_RX_MAX        1024  /* bytes a port keeps while the program is busy */
 
 #define SIM_MIDI_MAX      8192
@@ -54,9 +80,13 @@ typedef struct {
     uint16_t rx_len;
 } sim_port_t;
 
+typedef struct sim sim_t;
+
 /* What a tile and the hub have in common. */
 typedef struct {
+    sim_t *sim;
     bool powered;               /* false: no power, or not started yet */
+    bool off;                   /* sim_power() switched it off */
     bool halted;                /* in the ROM bootloader: there, but not ours */
     uint8_t uid[12];
     uint32_t clock;             /* its clock is the simulator's ms plus this */
@@ -67,6 +97,15 @@ typedef struct {
     bool have_flash;
     bool flash_fails;           /* set by a test: writes fail from now on */
     unsigned saves, reboots, bootloaders, rx_overruns;
+
+    /* its program flash, and what the bootloader made of it at the last start */
+    flashsim_t chip;
+    uint8_t slot;               /* the slot it runs from; FW_NO_SLOT: nothing to run, it is in its ROM */
+    bool trial;
+    uint8_t act;                /* SIM_ACT_: how the program in that slot behaves */
+    bool flashing;              /* what it is busy with is the program flash */
+    uint64_t wdt_at;            /* the step the watchdog restarts it at; 0: it does not */
+    unsigned wdt_resets, no_program;
 } sim_node_t;
 
 typedef struct {
@@ -110,7 +149,7 @@ typedef struct {
 typedef void (*sim_tap_fn)(void *ctx, int from, uint8_t from_port, int to, uint8_t to_port,
                            uint8_t type, const uint8_t *payload, uint8_t len);
 
-typedef struct {
+struct sim {
     uint64_t t;                 /* steps since the start */
     rng_t rng;
     sim_hub_t hub;
@@ -128,6 +167,13 @@ typedef struct {
      * 0 this many ms later. (Otherwise clocks start anywhere.) */
     uint32_t wrap_ms;
 
+    /* True: the tiles have their power from the hub, as on the real boards.
+     * Its program switches the power on SIM_FEED_MS after it starts, and
+     * when the program stops, for whatever reason, every tile stops with
+     * it. For a test to set, at any time. */
+    bool hub_feeds;
+    uint64_t feed_at;           /* the step the hub's program switches the power on at */
+
     /* the computer: what the hub gave it, what it types */
     uint8_t midi[SIM_MIDI_MAX][3];
     uint64_t midi_t[SIM_MIDI_MAX];      /* the step each message came out at */
@@ -139,7 +185,7 @@ typedef struct {
 
     sim_tap_fn tap;
     void *tap_ctx;
-} sim_t;
+};
 
 /* A hub, switched on, and nothing else. */
 void sim_init(sim_t *s, uint32_t seed);
@@ -157,10 +203,14 @@ void sim_plug(sim_t *s, int cable);
  * cable sends and the other end would have heard. */
 void sim_drop(sim_t *s, int cable, int end, uint8_t type, unsigned count);
 
-/* Off: the node stops dead. On: it starts from what is in its flash. */
+/* Off: the node stops dead. On: it starts from what is in its flash; a
+ * tile that has its power from the hub, once the hub feeds it. */
 void sim_power(sim_t *s, int node, bool on);
 
 void sim_run(sim_t *s, uint32_t ms);
+
+/* One step of 100 us: for a test that has to stop in the middle of something. */
+void sim_step(sim_t *s);
 
 /* Move a key to travel `to` (0..65535) in a straight line over `ms`. */
 void sim_move(sim_t *s, int tile, int key, int to, uint32_t ms);

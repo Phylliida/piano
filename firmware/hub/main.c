@@ -16,6 +16,8 @@
 
 #define CABLE_BAUD  1000000u    /* what uart_init() sets, and what the bridge gives back */
 
+PORT_IMAGE_HEADER(KIND_HUB);
+
 static hub_t hub;
 static const uart_hw_t cable_hw = LINK_HW;
 static uart_t cable;
@@ -442,6 +444,14 @@ static void save(void)
     hub_save_done(&hub, flash_save(image, sizeof image));
 }
 
+/* A new program for the hub itself goes into the other slot (core/fw.h),
+ * from inside the console's `fw hub` commands. The same standing still:
+ * 36 ms for `begin`, which erases two sectors, 18 ms for a write that
+ * reaches a new sector, under a millisecond for any other. */
+static const fw_flash_t program_flash = {
+    (const uint8_t *)FW_FLASH_BASE, NULL, flash_fw_erase, flash_fw_program
+};
+
 /* Restart, into this program or the ROM's. The computer first sees the
  * device unplugged for a moment, so that it asks the next one who it is.
  * The eFuses go off with the reset (their pull-downs): so do the tiles. */
@@ -532,7 +542,6 @@ int main(void)
     uint8_t uid[12];
     uint32_t last_tick;
 
-    port_boot_check();
     port_init(true);
     port_uid(uid);
     pins_start();
@@ -540,6 +549,7 @@ int main(void)
     adc_start();
     i2c1_start(pump);
     hub_init(&hub, uid, flash_record(), STORE_HUB_LEN, port_ms());
+    hub_set_flash(&hub, &program_flash, port_slot());
     ch224_init(&hub.pd, i2c1_xfer, NULL, port_ms());
     usb_start(uid);
     last_tick = port_ms();
@@ -547,6 +557,7 @@ int main(void)
     for (;;) {
         uint32_t now;
 
+        port_alive();
         pump();
         now = port_ms();
         if (now != last_tick) {
