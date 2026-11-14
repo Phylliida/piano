@@ -6,17 +6,17 @@ It is built from identical tiles of 8 x 5 keys on a hex lattice. Each key is
 an MX-style magnetic switch over a Hall-effect sensor, so the tile reads how
 far every key is pressed. Tiles snap together edge to edge, in any
 arrangement, and a short cable under each seam carries power and data. A hub
-(not designed yet) will plug into any free edge, take power in and give USB
-out: MIDI or raw key data.
+plugs into any free edge, takes power in and gives USB out: MIDI and a
+serial console with the raw key data.
 
 ## Status
 
 | part | state |
 |---|---|
 | tile PCB | routed, DRC clean, not ordered yet. [`pcb/README.md`](pcb/README.md) lists what to verify before ordering |
-| tile case | generated and checked on its solids, not printed yet |
-| hub | not designed |
-| firmware | not written |
+| tile case | printed once (2026-11-13): mostly good, but the tray warps a little when the bottom cover goes in. The cover and board need about 1 mm more room; not changed yet |
+| hub | circuit and schematic done ([`hub/`](hub/)); board not routed, case not designed |
+| firmware | tile and hub programs written and tested on a PC, never run on hardware: no board exists yet. [`firmware/README.md`](firmware/README.md) |
 
 ## Where things are
 
@@ -28,6 +28,8 @@ out: MIDI or raw key data.
 | `route_board.py`, `pcbroute.py` | the board's routing as a script |
 | `pcb/` | the KiCad project, and its README with the pin map for the firmware |
 | `gen_case.py` | builds the printed case from `tilegeom.py` |
+| `hub_circuit.py`, `gen_hub_lib.py`, `gen_hub_sch.py`, `hub/` | the hub's circuit as data, its KiCad library and schematic |
+| `firmware/` | the tile's and the hub's programs, their tests, and the script that flashes a tile through the hub |
 | `cad/` | its output: STLs ready to print, and two drawings |
 | `HE60_NOTES.md` | notes on the sensing chain (sections 1 to 5) |
 
