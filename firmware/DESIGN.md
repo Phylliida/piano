@@ -421,11 +421,13 @@ it is untested.
 
 ## What is left for later
 
-- A program for the PC that flashes a tile through `bridge`. The ROM
-  bootloader's UART protocol is not in any Artery document found so far.
+- Flashing a tile through the hub on real hardware. `tools/flash_tile.py`
+  is the program for it: `bootloader <tile>`, `bridge`, then the ROM
+  bootloader's UART protocol (Artery's PM0005). It has run against the
+  simulator only; `README.md`, "Flash", says what that leaves open.
 - Updating a tile through other tiles. The ROM bootloader listens on the
   tile's W and S ports only (USART2, USART3), so the hub's cable has to be
-  on one of those (`bootloader <tile>`, then `bridge`), while the hub's box
-  hangs on a tile's E edge.
+  in one of those, and the bridge reaches no further than that tile, while
+  the hub's box hangs on a tile's E edge.
 - More than one hub.
 - MPE and other tunings than twelve notes to the octave.

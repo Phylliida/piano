@@ -17,7 +17,7 @@ tile/    the tile's pins, key scan and main loop
 hub/     the hub's pins, measuring, USB and main loop
 sim/     tiles, a hub and cables on a PC
 tests/   unit tests and scenario tests
-tools/   fetch_deps.sh, gen_lut.py
+tools/   fetch_deps.sh, gen_lut.py, flash_tile.py
 ```
 
 ## Test
@@ -31,6 +31,18 @@ make test
 
 builds `core/` and `sim/` for the PC and runs the nine test programs. Each
 prints one line; the last line is `all tests passed` or `TESTS FAILED`.
+
+```
+make test-tools
+```
+
+tests `tools/flash_tile.py`, the script that flashes a tile through the hub,
+and needs Python 3.8 as well (about 40 s). Its scenarios run twice: against
+the hub's own program with one tile in the simulator (`tests/hubsim.c`, the
+hub behind a pipe), and against an imitation of the hub written in Python,
+which can also stage what the real program never does. The tile's chip, its
+flash and its ROM bootloader, is an imitation both times, written from
+Artery's manual. `make` alone does not run this.
 
 ## Build
 
@@ -89,34 +101,76 @@ AT32F405 will do: Artery's AT-Link with their ICP programmer, or their
 OpenOCD fork. Load the `.bin` at 0x08000000 or the `.elf`.
 
 **A tile, through the hub.** A tile has no USB socket. Its ROM bootloader
-listens on USART2 and USART3, which are the tile's W and S ports. The plan:
+takes a program over a UART, and `tools/flash_tile.py` gives it one through
+the hub, for the tile that the hub's cable is plugged into:
 
 ```
-bootloader <tile> 20000      the tile restarts into its ROM (bridging its
-                             BOOT0 pad to 3.3 V at power-up does the same);
-                             every other tile and the hub keep off the
-                             cables for 20 s
+python3 tools/flash_tile.py            flashes build/tile/tile.bin
+python3 tools/flash_tile.py other.bin
+python3 tools/flash_tile.py --check    only looks: the hub, the tile, the file
+python3 tools/flash_tile.py --rom      for a tile you put into its ROM by hand
+python3 tools/flash_tile.py --help     the other options
+```
+
+It needs Python 3.8 and nothing else on Linux and macOS; on Windows it
+needs pyserial, and that path has never run. On Linux it finds the hub by
+its USB ID; elsewhere it does so only with pyserial installed, and
+`--port` names the serial port otherwise. On the console it types
+
+```
+bootloader <tile> <ms>       the tile restarts into its ROM; every other
+                             tile and the hub keep off the cables that long
 bridge 115200 e straight     the console becomes a plain UART on the hub's
-                             cable (even parity); or `swapped`
+                             cable (even parity); `swapped` if nothing
+                             answers
 ```
 
-and then a program on the computer speaks the ROM's UART protocol through
-the serial port; closing the port ends the bridge. **That program is not
-written**, because the ROM's UART commands are in no Artery document found
-so far (they are probably the usual 0x7F / 0x79 kind; that is a guess).
-Three more things to know:
+and then speaks the ROM's UART protocol (Artery's PM0005) through the
+bridge: it erases the 2 KB sectors the program covers, writes the program,
+reads it back and compares, and restarts the tile. It ends the bridge by
+letting go of DTR and waits until the hub hears the tile again. For the
+tile's program, 15 KB, the script's own guess is 7 s of flashing at 115200
+baud, and it asks for 13 s of quiet; the tile is back when those are over.
 
-- The hub's cable has to be on the tile's **W or S** port for this. The
-  hub's box hangs on a tile's E edge, whose UART the ROM does not know.
-- Which of `straight` and `swapped` is right depends on the cable; try
-  both. A `bridge` inside the quiet that `bootloader` began can be ended
-  and started again without the hub speaking on the cable in between.
+It never erases or writes the last 2 KB of flash (settings and
+calibration), never erases the chip as a whole, and leaves the chip's
+protection settings alone. It refuses a file that is not a program for this
+chip, and the hub's program.
+
+`--rom` is for a tile that the console cannot send into its ROM: a blank
+one, or one whose program does not start. The script makes the cables quiet
+and then asks you to restart the tile with its BOOT0 pad bridged to the
+3.3 V pad beside it (the row of six pads on the tile's back). The order
+matters: the ROM measures the speed by the first byte it hears.
+
+**The script has never met a real hub or a real ROM**; see `make
+test-tools` above for what it has met. Things to know:
+
+- The hub's cable has to be in the tile's **W or S** port. The ROM listens
+  on USART2 and USART3, which are those two; the hub's box hangs on a
+  tile's E edge, whose UART the ROM does not know. The script asks the
+  console which port the cable is in and stops, with nothing changed, if it
+  is N or E.
+- It flashes one tile, the one on the hub's cable. The bridge reaches no
+  further.
+- Which of `straight` and `swapped` is right depends on the cable. The
+  script tries `straight` first; `--orientation` says which.
 - Artery's FAQ0122 says the ROM picks the first of its interfaces that sees
   a signal, and that floating receive pins can make it pick wrongly. On a
   tile PA10 (USART1 RX) is not connected, and neither is the RX pin of a W
   or S port with no cable in it.
+- If the flashing is cut off between erasing and the last write, the tile
+  has no complete program and sits in its ROM. The script says so, and what
+  to type next (`--rom`, pressing Enter twice without touching the tile).
+  When the quiet is over the hub speaks on the cable again, at a speed the
+  ROM does not expect; should the ROM stop answering because of that, the
+  tile has to be restarted into its ROM by hand.
+- What only hardware can tell: whether the firmware's jump into the ROM
+  works; the order of the bytes of the chip ID (the script takes either);
+  whether the ROM knows Reset Device (the script falls back to Jump); and
+  the times, which are generous guesses.
 
-Until that works, tiles are flashed over SWD.
+Until this has worked on a real tile, count on flashing tiles over SWD.
 
 ## Console
 
@@ -217,7 +271,10 @@ Known weak spots, by design or by omission:
 - If no program reads the MIDI port, messages are dropped after a quarter
   of a second; how the computer's own driver buffers them differs between
   systems and has not been looked at.
-- There is no program yet that flashes a tile through the bridge.
+- `tools/flash_tile.py` reaches only the tile on the hub's cable, and only
+  by that tile's W or S port, while the hub's box is made for a tile's E
+  edge. Flashing a whole keyboard through the hub means moving the cable
+  from tile to tile, or a change to the hardware.
 
 ## Licences
 

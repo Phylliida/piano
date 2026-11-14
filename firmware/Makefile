@@ -1,6 +1,7 @@
 # Firmware for the tile and the hub.
 #
 #   make test    build core/ and sim/ for this PC and run every test
+#   make test-tools   test tools/flash_tile.py (needs python3; not part of `make`)
 #   make tile    build/tile/tile.elf, .bin, .map      (needs tools/fetch_deps.sh)
 #   make hub     build/hub/hub.elf, .bin, .map        (needs tools/fetch_deps.sh)
 #   make         all three
@@ -11,7 +12,7 @@ CROSS  ?= arm-none-eabi-
 HOSTCC ?= cc
 B      := build
 
-.PHONY: all test tile hub clean
+.PHONY: all test test-tools tile hub clean
 all: test tile hub
 
 clean:
@@ -43,8 +44,13 @@ test: $(TESTS:%=$(B)/host/%)
 	@fail=0; for t in $^; do ./$$t || fail=1; done; \
 	if [ $$fail = 0 ]; then echo "all tests passed"; else echo "TESTS FAILED"; exit 1; fi
 
+# The flashing script is tested against tests/hubsim.c, which is the hub's
+# program behind a pipe, and against an imitation of the hub in Python.
+test-tools: $(B)/host/hubsim
+	@python3 tests/test_flash_tile.py
+
 .PRECIOUS: $(B)/host/%.o
--include $(HOST_OBJ:.o=.d) $(TESTS:%=$(B)/host/tests/%.d)
+-include $(HOST_OBJ:.o=.d) $(TESTS:%=$(B)/host/tests/%.d) $(B)/host/tests/hubsim.d
 
 # ------------------------------------------------------------- ARM builds ---
 # Our own files are compiled with -Wall -Wextra -Werror. The two libraries

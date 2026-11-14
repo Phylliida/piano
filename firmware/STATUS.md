@@ -21,6 +21,29 @@ the "Missing" list is empty.
 | `sim/` | whole keyboards on a PC: real tile and hub programs, simulated cables, keys, flash, time | `tests/test_sim.c` (19 scenarios) |
 | `tools/gen_lut.py`, `tools/fetch_deps.sh` | the table; the two libraries | ran |
 
+`make test-tools` (Python 3.8) prints 87 tests, OK:
+
+| file | what | test |
+|---|---|---|
+| `tools/flash_tile.py` | flashes the tile on the hub's cable: `bootloader`, `bridge`, then the ROM bootloader's UART protocol (Artery's PM0005) | `tests/test_flash_tile.py` |
+| `tests/hubsim.c` | the hub's program and one tile in the simulator, behind a pipe, for that test | |
+
+The script's scenarios run against the hub's own program (`hubsim`) and
+against an imitation of the hub; the tile's ROM bootloader and flash are an
+imitation both times, written from the manual. Running it against the real
+hub program found four faults in the script, which are mended: it gave up
+on a hub that had only just got its power; it took a hub that was still
+inside an earlier `quiet` for a hub without a tile; it did not wait for the
+20 ms the hub goes on speaking after `quiet`; and it took what the hub
+remembered of the tile from before the flashing for the tile having come
+back.
+The bytes of each ROM command the script sends (sync, Get Version, Get
+Device ID, Read Memory, Write Memory, Erase, Jump, Reset Device) were
+compared once more with PM0005 V2.0.4 on 2026-11-13 and agree with it. That
+is the script against the manual, not against a chip.
+`hubsim.c` holds copies of two loops of `hub/main.c` (`console_in`,
+`bridge_run`); when those change, the copies must follow by hand.
+
 `DESIGN.md` describes this code as it is. `README.md` says how to build,
 test and flash, and lists what is untested.
 
@@ -44,7 +67,7 @@ text 39636, data 40, bss 26128 bytes.
 | `hub/board.h` | the hub's pins and constants (copy of `hub_circuit.py`) |
 | `hub/tusb_config.h`, `hub/usb.c` | TinyUSB as one serial port and one MIDI port, 0x1209:0x0001 |
 | `hub/main.c` | measuring, the power pins, the cable, console, MIDI, bridge, LEDs, button |
-| `Makefile` | `make test`, `make tile`, `make hub`, `make clean` |
+| `Makefile` | `make test`, `make test-tools`, `make tile`, `make hub`, `make clean` |
 
 What exactly is unproven in these is listed in `README.md`, "What is
 untested".
@@ -53,17 +76,23 @@ untested".
 
 - **Everything on hardware.** No board exists; the first one will show
   which of the register-level guesses were wrong.
-- **The program that flashes a tile through the hub** (`tools/flash_tile.py`
-  was the plan). The hub's side is there and tested on a PC (`bootloader
-  <tile> [ms]`, `bridge <baud> [n|e|o] [straight|swapped]`). The PC's side
-  is not written, because the ROM bootloader's UART commands are in no
-  Artery document found so far (the pointer is their "ISP Programmer"
-  manual); it would have to assume the usual 0x7F / 0x79 protocol.
-  Until then tiles are flashed over SWD.
+- **Flashing a tile through the hub, on hardware.** `tools/flash_tile.py`
+  is written and tested as far as a PC goes, and has never met a real hub
+  or a real ROM bootloader. Not known until it has: whether the firmware's
+  jump into the ROM works; the order of the chip ID's bytes in Get Device
+  ID (the script takes either); whether this ROM knows Reset Device (the
+  script falls back to Jump); whether the ROM, once it has heard the hub,
+  ignores its other UARTs as PM0007 says; whether the times are long
+  enough (they are guesses, the 2 s for a hub that has only just got its
+  power among them: the simulator has no power sequencing). The script's
+  Windows path (pyserial) has never run at all, and the hub's USB and UART
+  code is not part of the test. Until it has worked once, tiles are
+  flashed over SWD.
 - **The ROM bootloader and the hub's place.** The ROM listens on USART2 and
   USART3 (a tile's W and S ports), and the hub's box hangs on a tile's E
   edge (UART8). Flashing through the hub needs the cable moved, or the
-  hardware changed; that is the hardware's decision, not made here.
+  hardware changed; that is the hardware's decision, not made here. The
+  script stops, with nothing changed, when the cable is in N or E.
 - **The USB DFU command line** in the README (`dfu-util`, 2e3c:df11) is
   from other AT32 chips and has not been tried on this one.
 - **A real USB product ID** (0x1209:0x0001 is pid.codes' test ID).
