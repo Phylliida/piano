@@ -41,6 +41,16 @@ PEG_CLEAR = 0.25        # courtyard-to-hole clearance around the switch pegs
 # the front (switch side) is free for long runs and ground -- HE60 routes 67
 # keys on 2 layers.  4 would give a solid ground plane and easier routing.
 LAYERS = 2
+NAME = "tile"
+
+
+def configure(geom, circuit, out_dir, name):
+    """Point this module's helpers at another board: gen_hub_pcb.py places
+    the hub with them.  <out_dir>/<name>.kicad_pcb, footprints of its own in
+    <out_dir>/<name>.pretty."""
+    global g, tc, OUT, PCB, NAME
+    g, tc, OUT, NAME = geom, circuit, out_dir, name
+    PCB = os.path.join(OUT, name + ".kicad_pcb")
 
 
 # ------------------------------------------------------------- coordinates ---
@@ -60,7 +70,7 @@ def load(fpid, board):
     """Load a footprint and add it to the board at once: KiCad's Flip()
     segfaults on a footprint that has no board yet."""
     nick, name = fpid.split(":", 1)
-    path = os.path.join(OUT, "tile.pretty") if nick == "tile" else os.path.join(FPDIR, nick + ".pretty")
+    path = os.path.join(OUT, NAME + ".pretty") if nick == NAME else os.path.join(FPDIR, nick + ".pretty")
     fp = pcbnew.FootprintLoad(path, name)
     assert fp is not None, "footprint %s not found" % fpid
     fp.SetFPID(pcbnew.LIB_ID(nick, name))
@@ -449,19 +459,20 @@ NETCLASSES = [
 ]
 
 
-def set_netclasses(pro):
+def set_netclasses(pro, netclasses=None):
     """Write NETCLASSES into the .kicad_pro, after KiCad's own save."""
+    netclasses = netclasses or NETCLASSES
     d = json.load(open(pro))
     ns = d.setdefault("net_settings", {})
     base = next(c for c in ns["classes"] if c["name"] == "Default")
     classes = []
-    for prio, (name, track, clear, via, drill, _) in enumerate(NETCLASSES):
+    for prio, (name, track, clear, via, drill, _) in enumerate(netclasses):
         c = dict(base, name=name, track_width=track, clearance=clear, via_diameter=via, via_drill=drill)
         c["priority"] = 2147483647 if name == "Default" else prio
         classes.append(c)
     ns["classes"] = classes
     ns["netclass_patterns"] = [{"netclass": name, "pattern": net}
-                               for name, *_, nets in NETCLASSES for net in nets]
+                               for name, *_, nets in netclasses for net in nets]
     # Crowded small pads get one thermal spoke; that carries their current fine.
     d["board"]["design_settings"]["rules"]["min_resolved_spokes"] = 1
     with open(pro, "w") as fh:
@@ -485,7 +496,7 @@ def dump_geometry(board):
 
 
 def drc():
-    rpt = os.path.join(OUT, "tile.drc.json")
+    rpt = os.path.join(OUT, NAME + ".drc.json")
     if os.path.exists(rpt):
         os.remove(rpt)          # never read last run's report by mistake
     r = subprocess.run([os.path.join(HERE, "kcli.sh"), "pcb", "drc", "--schematic-parity", "--severity-all",
