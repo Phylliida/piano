@@ -6,7 +6,7 @@ It is built from identical tiles of 8 x 5 keys on a hex lattice. Each key is
 an MX-style magnetic switch over a Hall-effect sensor, so the tile reads how
 far every key is pressed. Tiles snap together edge to edge, in any
 arrangement, and a short cable under each seam carries power and data. A hub
-plugs into any free edge, takes power in and gives USB out: MIDI and a
+hangs on a free east edge, takes power in and gives USB out: MIDI and a
 serial console with the raw key data.
 
 ## Status
@@ -15,7 +15,7 @@ serial console with the raw key data.
 |---|---|
 | tile PCB | routed, DRC clean, not ordered yet. [`pcb/README.md`](pcb/README.md) lists what to verify before ordering |
 | tile case | printed once (2026-11-13): mostly good, but the tray warps a little when the bottom cover goes in. The cover and board need about 1 mm more room; not changed yet |
-| hub | circuit, schematic and board done ([`hub/`](hub/)): routed, DRC clean, not reviewed by a person and not ordered. Case not designed |
+| hub | circuit, schematic and board done ([`hub/`](hub/)): routed, DRC clean, not reviewed by a person and not ordered. Its case is designed with the room the tile's print asked for, and its fits are checked on the solids; not printed |
 | firmware | tile and hub programs written and tested on a PC, never run on hardware: no board exists yet. Every tile and the hub take new programs through the hub's USB, also only on a PC so far. [`firmware/README.md`](firmware/README.md) |
 
 ## Where things are
@@ -31,8 +31,9 @@ serial console with the raw key data.
 | `hub_circuit.py`, `gen_hub_lib.py`, `gen_hub_sch.py` | the hub's circuit as data, its KiCad library and schematic |
 | `hubgeom.py`, `gen_hub_pcb.py`, `route_hub.py` | the hub board's dimensions, the placement of its parts, and its routing as a script |
 | `hub/` | the hub's KiCad project |
+| `gen_hub_case.py` | builds the hub's printed case from `hubgeom.py` |
 | `firmware/` | the tile's and the hub's programs, the bootloader, their tests, and the scripts that put programs on every tile and the hub through the hub |
-| `cad/` | its output: STLs ready to print, and two drawings |
+| `cad/` | the output of both case scripts: STLs ready to print, and three drawings |
 | `HE60_NOTES.md` | notes on the sensing chain (sections 1 to 5) |
 
 `TILE95.md`, `COST_ESTIMATE.md`, `gen_tile.py`, `gen_hex_board.py`,
@@ -76,6 +77,33 @@ The rails carry a tile's weight, the latches only hold it down. So lift an
 assembly by its south-west tile or from underneath; lifted by another tile,
 the ones south and west of it hang on their latches.
 
+### The hub
+
+The hub's case is a tray and a cover like a tile's, 45 x 109 mm. Its W wall
+is a tile's W wall: two rail slots, a latch window and a cable channel. Its
+N wall has the windows for the two USB-C sockets.
+
+![the hub on a tile, from above and in section](cad/hub.svg)
+
+- **Where:** on the free E edge of any tile. Lower it onto that tile's rails
+  as you would a tile. Nothing joins onto the hub, and the place north-east
+  of its tile has to stay empty: a tile there would stand in front of the
+  sockets.
+- **Board:** drops into the tray from below. The N wall and six small nubs
+  locate it.
+- **Cover:** tuck its W edge over the lip, then press its E edge down past
+  the three tabs in the E wall. To open it, reach into the cable channel
+  and pull the cover's edge up there; the tabs give way.
+- **Cable:** the same 50 mm cable, from the hub's header to the tile's E
+  header, in the channel under the seam.
+
+This case has what the first tile print asked for. The cover stands 1 mm off
+every wall, except for six ears 8 mm long: three on the W lip, three on the
+tabs' bumps. The board stands 1 mm or more off the W and E walls and the rib
+south of it, except at the nubs. The tabs are strips cut free of the E wall,
+so they bend and the wall does not. The tile's own case does not have this
+yet.
+
 ### Printing
 
 `cad/` holds the parts in their print orientation: the tray upside down
@@ -92,6 +120,11 @@ tile's tray is 168 x 134 mm.
 3. **`tray.stl`, `cover.stl`** and, until boards exist, **`pcb_dummy.stl`**:
    a plastic stand-in with the board's outline, thickness and peg holes.
 
+4. **The hub:** `hub_tray.stl`, `hub_cover.stl` and, until a board exists,
+   `hub_pcb_dummy.stl`, which also has blocks where the two sockets and the
+   cable header are. Try it on a full tray: a coupon has a rail where the
+   hub has wall.
+
 If a fit is off, change the number in `tilegeom.py` and run `gen_case.py`
 again:
 
@@ -104,6 +137,15 @@ again:
 `LIP_W` and `CATCH_D` must stay as they are: the board's outline is built on
 them.
 
+The hub has its own numbers in `hubgeom.py`, for `gen_hub_case.py`:
+
+| symptom | constant |
+|---|---|
+| cover rattles sideways, or is hard to get in | `EAR_CLEAR` (0.2 mm; the script takes 0.1 to 0.25) |
+| board rattles, or will not go in | `NUB_CLEAR` (0.3 mm), `NUB_W` (3 mm) |
+| cover bulges, or the board is loose under it | `POST_PRELOAD` (0.1 mm) |
+| tabs too stiff or too weak | `TAB_W` (8 mm; narrower is softer) |
+
 Not yet tried in plastic, so expect a round or two on the coupons. Known
 soft spots:
 
@@ -113,15 +155,22 @@ soft spots:
 - The W lip is a 1.5 mm ledge with nothing under it. Its underside, which
   the cover rests on, will come out rough.
 - The dovetails' sharp edges print rounded, which loosens them slightly.
+- The hub's tabs also bend across their layers (0.8 % strain), and the
+  wall over each USB-C window is a 14 mm bridge.
 
 ### Building the case files
 
 ```
 python3 tilegeom.py     # check the geometry
 python3 gen_case.py     # check the fits on the solids, write cad/
+python3 hubgeom.py      # the same two steps for the hub
+python3 gen_hub_case.py
 ```
 
 `gen_case.py` needs `manifold3d` and `numpy`. It refuses to write anything
 unless the solids show that neighbouring tiles clear each other, that a tile
 can be lowered onto its neighbours' rails, that the latches and dovetails
-then hold it, and that the cover and the PCB fit.
+then hold it, and that the cover and the PCB fit. `gen_hub_case.py` does the
+same for the hub: its board and cover fit and are held, a USB-C plug fits
+each window, and the hub can be lowered onto a tile's E edge, is held there,
+leaves the cable's way open and clears the tiles around it.

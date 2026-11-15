@@ -58,21 +58,35 @@ BUTTON_POCKET = 0.6     # ... this deep: the body is as tall as the gap under th
 
 # ----------------------------------------------------- what holds the board ---
 # The board lies against ribs under the plate and is pushed onto them by the
-# cover's posts.  With no switch pegs to place it, fences do that: the N wall,
-# a rib across its south edge, and pads on the W and E walls.
+# cover's posts.  With no switch pegs to place it, the N wall and short nubs
+# do that: two on a rib across the south, two on each of the W and E walls.
+# The rib itself stands FENCE_ROOM off the board, so only the nubs are near.
 RIBS_Y = (47.5, 66.5, 88.0)                     # ribs across the whole width
 POSTS = ((22.5, 102.5), (8.0, 66.5), (37.0, 66.5), (31.0, 47.5))
+POST_PRELOAD = 0.1                              # half a tile's: four posts, and soft tabs
 FENCE_T = 1.5                                   # the south fence rib
-FENCE_W_Y = ((44.0, 50.0), (86.0, 92.0))        # fence pads on the W wall ...
-FENCE_E_Y = ((44.0, 50.0), (76.0, 82.0))        # ... and the E wall
+FENCE_ROOM = 1.0
+NUB_W = 3.0                                     # a nub, along the edge it holds
+NUB_CLEAR = PCB_CLEAR                           # a nub to the board's edge
+NUBS_S_X = (9.0, 36.0)                          # nubs on the south rib ...
+NUBS_W_Y = (47.5, 88.0)                         # ... on the W wall, each at a rib's end ...
+NUBS_E_Y = (47.5, 79.0)                         # ... and on the E wall
 
 # ------------------------------------------------------- what holds the cover ---
 # W: the lip, as on a tile.  E: the wall is free here (no tile ever meets it),
 # so it carries the springs itself: three tabs, each a strip of wall between
-# two slits with a tile's catch bump at its foot.  The cover's edge is plain.
-TAB_Y = (22.0, 58.0, 94.0)
+# two slits with a tile's catch bump at its foot.
+#
+# The first printed tile cover sat COVER_CLEAR from its walls all round, and
+# bent its tray.  This one stands COVER_ROOM clear of every wall but for six
+# ears: short stretches of its W and E edges that reach out to EAR_CLEAR,
+# over the lip and over each tab's bump.  North to south it lies loose.
+COVER_ROOM = 1.0
+EAR_CLEAR = COVER_CLEAR                         # an ear to the wall
+TAB_Y = (20.0, 58.0, 95.0)                      # the tabs, and the cover's ears on both edges
 TAB_W = 8.0
 TAB_SLIT = 1.0
+EAR_W = 8.0
 
 
 def outline(inset=0.0):
@@ -90,7 +104,18 @@ def case_inner():
 
 
 def cover_outline():
-    return outline(SEAM_GAP / 2 + WALL_T + COVER_CLEAR)
+    """The cover without its ears."""
+    return outline(SEAM_GAP / 2 + WALL_T + COVER_ROOM)
+
+
+def cover_ears():
+    """Rectangles added to the cover's W and E edges, out to EAR_CLEAR from
+    the wall: {"W": [...], "E": [...]}."""
+    ix0, _, ix1, _ = bbox(case_inner())
+    cx0, _, cx1, _ = bbox(cover_outline())
+    spans = [(y - EAR_W / 2, y + EAR_W / 2) for y in TAB_Y]
+    return {"W": [(ix0 + EAR_CLEAR, a, cx0, b) for a, b in spans],
+            "E": [(cx1, a, ix1 - EAR_CLEAR, b) for a, b in spans]}
 
 
 def pcb_outline():
@@ -207,14 +232,21 @@ def posts():
     return list(POSTS)
 
 
+def nub_spans(centres):
+    return [(c - NUB_W / 2, c + NUB_W / 2) for c in centres]
+
+
 def fences():
-    """Rectangles that reach from the plate down to the board's back face and
-    stand PCB_CLEAR off its edge: one rib across the south, pads on W and E."""
+    """Rectangles that reach from the plate down to the board's back face: a
+    rib across the south, FENCE_ROOM off the board's edge, and the nubs that
+    stand NUB_CLEAR off it, on that rib and on the W and E walls."""
     ix0, _, ix1, _ = bbox(case_inner())
     px0, py0, px1, _ = bbox(pcb_outline())
-    out = [(ix0, py0 - PCB_CLEAR - FENCE_T, ix1, py0 - PCB_CLEAR)]
-    out += [(ix0, a, px0 - PCB_CLEAR, b) for a, b in FENCE_W_Y]
-    out += [(px1 + PCB_CLEAR, a, ix1, b) for a, b in FENCE_E_Y]
+    y = py0 - NUB_CLEAR
+    out = [(ix0, y - FENCE_ROOM - FENCE_T, ix1, y - FENCE_ROOM)]
+    out += [(a, y - FENCE_ROOM, b, y) for a, b in nub_spans(NUBS_S_X)]
+    out += [(ix0, a, px0 - NUB_CLEAR, b) for a, b in nub_spans(NUBS_W_Y)]
+    out += [(px1 + NUB_CLEAR, a, ix1, b) for a, b in nub_spans(NUBS_E_Y)]
     return out
 
 
@@ -248,8 +280,8 @@ def tab_bumps():
 def tab_flex():
     """(strain, newtons) as a tab is pushed out far enough to let the cover
     pass: a cantilever of the wall's thickness, from the plate to its bump."""
-    d = CATCH_D - COVER_CLEAR
-    a = (Z_COVER_BOT - COVER_CLEAR + CATCH_D) - Z_PLATE     # the plate's underside to the bump's crest
+    d = CATCH_D - EAR_CLEAR
+    a = (Z_COVER_BOT - EAR_CLEAR + CATCH_D) - Z_PLATE       # the plate's underside to the bump's crest
     return 1.5 * d * WALL_T / a ** 2, 3 * PLA_E * (TAB_W * WALL_T ** 3 / 12) * d / a ** 3
 
 
@@ -293,20 +325,37 @@ def check():
         assert not any(r[0] - d / 2 - 1 < x < r[2] + d / 2 + 1 and r[1] - d / 2 - 1 < y < r[3] + d / 2 + 1
                        for r in ribs() + fences()), "a plate hole is on a rib"
 
-    # W wall: slots, window, channel and fence pads apart; E wall: tabs and pads apart.
+    # W wall: slots, window, channel and nubs apart; E wall: tabs and nubs apart.
     half = tg.slot_half(SEAM_GAP + WALL_T) + tg.RAIL_FLARE
     west = [(y - half, y + half) for y in rail_slots()] + \
            [(y - tg.LATCH_W / 2 - 1, y + tg.LATCH_W / 2 + 1) for y in latch_windows()] + \
-           [(port_slot()[1], port_slot()[3])] + list(FENCE_W_Y)
-    east = tabs() + list(FENCE_E_Y)
+           [(port_slot()[1], port_slot()[3])] + nub_spans(NUBS_W_Y)
+    east = [(a - TAB_SLIT, b + TAB_SLIT) for a, b in tabs()] + nub_spans(NUBS_E_Y)
+    # Nothing that stands on the E wall may hold a tab: ribs and the south rib end clear of the slits.
+    fixed = [(r[1], r[3]) for r in ribs() + fences()[:1] if r[2] >= inner[2] - 1e-9]
+    for a, b in tabs():
+        assert all(d <= a - TAB_SLIT - 0.5 or b + TAB_SLIT + 0.5 <= c for c, d in fixed), \
+            "a rib ends on the tab at y = %.1f" % ((a + b) / 2)
     for name, spans, room in (("W", west, 1.0), ("E", east, 1.0)):
         spans = sorted(spans)
         assert all(b[0] - a[1] >= room for a, b in zip(spans, spans[1:])), "%s wall: features overlap: %s" % (name, spans)
         assert spans[0][0] > 0.5 and spans[-1][1] < HEIGHT - WALL_T - 1.0, "%s wall: a feature runs off its end" % name
     notes.append("S rail slot: %.2f mm wide at its mouth, which ends %.2f mm from the hub's S face"
                  % (2 * half, min(rail_slots()) - half))
-    # The notch cuts the cover nearly in two: each part needs a tab of its own.
+    # The notch cuts the cover nearly in two: each part needs a tab of its own,
+    # and an ear on the lip.  An ear covers its bump wherever the cover lies,
+    # and no W ear hangs over the channel, where the lip is cut away.
     assert any(b < notch[1] for _, b in tabs()) and any(a > notch[3] for a, _ in tabs())
+    ears = cover_ears()
+    assert len(ears["E"]) == len(tab_bumps())
+    for (_, a, _, b), (c, d) in zip(ears["E"], tab_bumps()):
+        assert a + COVER_ROOM <= c and d <= b - COVER_ROOM, "an ear can slide off its bump"
+    slot = port_slot()
+    for x0, a, x1, b in ears["W"]:
+        assert b + COVER_ROOM + 1.0 <= slot[1] or slot[3] <= a - COVER_ROOM - 1.0, "a W ear is over the channel"
+        assert x1 - x0 > 0 and bbox(case_inner())[0] + LIP_W - x0 >= 1.0, "a W ear hardly reaches over the lip"
+    for x0, y0, x1, y1 in fences()[1:]:
+        assert x1 > x0 and y1 > y0
     strain, force = tab_flex()
     assert strain < 0.012, "a cover tab bends too far: %.2f %%" % (100 * strain)
     notes.append("cover tabs: %.2f %% strain, %.1f N each to push aside" % (100 * strain, force))
