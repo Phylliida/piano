@@ -32,7 +32,3 @@ work/
 # firmware/tools/fetch_deps.sh downloads
 firmware/build/
 firmware/deps/
-
-# Firmware: build output, and the two libraries tools/fetch_deps.sh downloads
-firmware/build/
-firmware/deps/
