@@ -15,7 +15,7 @@ serial console with the raw key data.
 |---|---|
 | tile PCB | routed, DRC clean, not ordered yet. [`pcb/README.md`](pcb/README.md) lists what to verify before ordering |
 | tile case | printed once (2026-11-13): mostly good, but the tray warps a little when the bottom cover goes in. The cover and board need about 1 mm more room; not changed yet |
-| hub | circuit, schematic and board done ([`hub/`](hub/)): routed, DRC clean, not reviewed by a person and not ordered. Its case is designed with the room the tile's print asked for, and its fits are checked on the solids; not printed |
+| hub | circuit, schematic and board done: routed, DRC clean, not reviewed by a person and not ordered. [`hub/README.md`](hub/README.md) lists what to verify before ordering. Its case is designed with the room the tile's print asked for, and its fits are checked on the solids; not printed |
 | firmware | tile and hub programs written and tested on a PC, never run on hardware: no board exists yet. Every tile and the hub take new programs through the hub's USB, also only on a PC so far. [`firmware/README.md`](firmware/README.md) |
 
 ## Where things are
@@ -30,7 +30,7 @@ serial console with the raw key data.
 | `gen_case.py` | builds the printed case from `tilegeom.py` |
 | `hub_circuit.py`, `gen_hub_lib.py`, `gen_hub_sch.py` | the hub's circuit as data, its KiCad library and schematic |
 | `hubgeom.py`, `gen_hub_pcb.py`, `route_hub.py` | the hub board's dimensions, the placement of its parts, and its routing as a script |
-| `hub/` | the hub's KiCad project |
+| `hub/` | the hub's KiCad project, and its README with the pin map for the firmware |
 | `gen_hub_case.py` | builds the hub's printed case from `hubgeom.py` |
 | `firmware/` | the tile's and the hub's programs, the bootloader, their tests, and the scripts that put programs on every tile and the hub through the hub |
 | `cad/` | the output of both case scripts: STLs ready to print, and three drawings |
