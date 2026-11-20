@@ -291,7 +291,7 @@ Lines end with CR or LF. Every command answers with lines and then `ok` or
 
 ```
 help                              this list
-version                           "piano hub, firmware 0001, protocol 1, id ..."
+version                           "piano hub, firmware 0002, protocol 1, id ..."
 tiles | grid | info <tile>        what is plugged in, and where
 get [name] | set <name> <n>       hub settings: base stepa stepb channel vel1
                                   vel127 bend aftertouch pd
@@ -316,6 +316,21 @@ fw <tile|all|hub> confirm         a new program, as tools/update.py sends it
 ```
 
 A tile is its number in `tiles`, its place `u,v`, or its 8-digit hex ID.
+
+A cable runs at 4 Mbaud when both its ends offer that, and at 1 Mbaud until
+they have agreed, or if they cannot (`DESIGN.md`, "How fast"). `grid` ends
+with a line for every cable that stays slow, and why:
+
+```
+slow: tile 0 port W to tile 1 port E, 1 Mbaud: 4 tries at more failed
+slow: tile 2 port N to tile 3 port S, 1 Mbaud: a try at more failed, the next is to come
+slow: the hub to tile 5 port E, 1 Mbaud: tile 5 offers no more
+```
+
+`tiles` marks such a port (`W at 1 Mbaud`), `info <tile>` gives each port's
+rate, and `stats` the hub's own cable. A tile whose program is from before
+the two rates (`fw 0001` in `tiles`) offers no more than 1 Mbaud, and its
+`info` shows no rates.
 
 Settings: `base` -500..500 (the MIDI note of the south-west key, 48),
 `stepa`, `stepb` -24..24 (4, 7), `channel` 1..16, `vel1`, `vel127` 1..65535
@@ -366,7 +381,11 @@ never seen working:
 - USB on PA11/PA12 with no pin setup and with the VBUS pin ignored, and
   whether that setting survives TinyUSB's reset of the controller;
 - the UARTs: DMA request routing, receiving into a ring while flash is
-  erased, swapping TX and RX (`TRPSWAP`) between frames;
+  erased, swapping TX and RX (`TRPSWAP`) between frames, changing the speed
+  between frames;
+- 4 Mbaud on a real cable: the edges behind 220 ohm at each end, and whether
+  the main loops keep up with four ports full (`DESIGN.md`, "What is left
+  for later", says what to look at);
 - the key scan: mux settling time, ADC sample times, the timer trigger;
 - the hub's ADC through 10 k series resistors, PC13 as an input;
 - I2C to the CH224A at about 10 kHz with only that chip's pull-ups, and the
@@ -408,7 +427,11 @@ Known weak spots, by design or by omission:
 - An old and a new program have to understand each other for as long as an
   update takes: the old hub sends the tiles their new program, and the new
   hub confirms them. A change to the protocol that breaks this needs more
-  than `update.py`.
+  than `update.py`. (Versions 0001 and 0002 do: between them a cable stays
+  at 1 Mbaud.)
+- A cable that carries 4 Mbaud badly is not sent back to 1 Mbaud while its
+  link stays up. It shows as bad frames in `stats` and `info <tile>`; the
+  way out is a build with `RATE_MAX` set to `RATE_1M` in `core/proto.h`.
 
 ## Licences
 

@@ -5,13 +5,13 @@ the "Missing" list is empty.
 
 ## Done and tested on a PC (`make test`, address + undefined sanitizers)
 
-`make test` prints 10 programs, 142 tests, 4 000 554 checks, 0 failed.
+`make test` prints 10 programs, 164 tests, 4 058 035 checks, 0 failed.
 
 | file | what | test |
 |---|---|---|
 | `core/proto.h` | frame types, sizes, times | |
 | `core/util`, `core/frame` | byte order, ID hash, CRCs, COBS, frames, receiver | `tests/test_frame.c` |
-| `core/link` | one port: HELLO, swap search, up/down, neighbour | `tests/test_link.c` |
+| `core/link` | one port: HELLO, swap search, up/down, neighbour, the cable's rate (1 or 4 Mbaud) | `tests/test_link.c` |
 | `core/node` | beacon tree, forwarding, queues and their drop order, quiet, pause | `tests/test_node.c` |
 | `core/keys`, `core/lut` | ADC values to notes, calibration, parameters, depth | `tests/test_keys.c` |
 | `core/store`, `core/tile` | flash records; the tile program (NOTE, STATE, INFO, POS, RAW, commands) | `tests/test_tile.c` |
@@ -19,16 +19,16 @@ the "Missing" list is empty.
 | `core/power`, `core/ch224` | the hub's power policy; the PD chip's registers | `tests/test_power.c` |
 | `core/hub`, `core/grid`, `core/console` | the tile table, the layout, MIDI, command jobs, the console, the bridge | `tests/test_hub.c` |
 | `core/fw` | firmware update: the two slots and their states, what the bootloader chooses, receiving an image, confirming it | `tests/test_fw.c` |
-| `sim/` | whole keyboards on a PC: real tile and hub programs, simulated cables, keys, flash, time; each chip's program flash (`sim/flashsim`), the bootloader's choice at every start, the watchdog, the tiles' power through the hub | `tests/test_sim.c` (24 scenarios) |
+| `sim/` | whole keyboards on a PC: real tile and hub programs, simulated cables, keys, flash, time; each chip's program flash (`sim/flashsim`), the bootloader's choice at every start, the watchdog, the tiles' power through the hub; time in steps of 0.1 ms, cables at either rate, programs from before the two rates | `tests/test_sim.c` (32 scenarios) |
 | `tools/gen_lut.py`, `tools/fetch_deps.sh` | the table; the two libraries | ran |
 
-`make test-tools` (Python 3.8) prints 38, 110 and 76 tests, OK:
+`make test-tools` (Python 3.8) prints 38, 111 and 78 tests, OK:
 
 | file | what | test |
 |---|---|---|
 | `tools/mkimage.py` | fills in an image's length and checksum; puts the factory file together; shows what a file is | `tests/test_mkimage.py` (38), with `tests/fwcheck.c`: `core/fw.c` reads what the script wrote |
-| `tools/update.py` | new programs to every tile and the hub, through the hub's console | `tests/test_update.py` (76) |
-| `tools/flash_tile.py` | a tile's first program: `bootloader`, `bridge`, then the ROM bootloader's UART protocol (Artery's PM0005) | `tests/test_flash_tile.py` (110) |
+| `tools/update.py` | new programs to every tile and the hub, through the hub's console | `tests/test_update.py` (78) |
+| `tools/flash_tile.py` | a tile's first program: `bootloader`, `bridge`, then the ROM bootloader's UART protocol (Artery's PM0005) | `tests/test_flash_tile.py` (111) |
 | `tests/hubsim.c` | the hub's program and its tiles in the simulator, behind a pipe, for those tests; the test says when cables, power and flash fail | |
 
 `update.py`'s tests run the script against the tiles' and the hub's own
@@ -60,6 +60,17 @@ is the script against the manual, not against a chip.
 `hubsim.c` holds copies of two loops of `hub/main.c` (`console_in`,
 `bridge_run`); when those change, the copies must follow by hand.
 
+The cables' two rates (`DESIGN.md`, "How fast") were tried in the simulator
+with: nine tiles and a hub starting together (thirteen cables at 4 Mbaud
+after 0.4 s, no bad frame); a cable that carries 1 Mbaud and nothing faster
+(four tries, then 1 Mbaud for good, no note lost); a tile with the program
+from before the two rates between new ones; an asking and a GO that are
+lost; an asked tile that stands still for 40 ms; `bootloader <tile>` and
+`bridge` in between; a keyboard of old programs that takes the new ones
+through `update.py` and old ones again (`tests/test_sim.c`,
+`tests/test_update.py`). The unit tests of `core/link` run two ends
+against each other and lose each `HELLO` of the exchange in turn.
+
 `DESIGN.md` describes this code as it is. `README.md` says how to build,
 test and flash, and lists what is untested.
 
@@ -70,10 +81,12 @@ text 2192, data 0, bss 4096 bytes, of the 8 KB it may take.
 
 `make tile CROSS=<prefix>` builds `build/tile/tile_a` and `tile_b`
 (`.elf`, `.bin`, `.map`, `.img`) and `tile_factory.bin`:
-text 17300, data 4, bss 46660 bytes; an image is 17 308 bytes.
+text 18532, data 4, bss 79564 bytes; an image is 18 540 bytes. Of the
+bss, 64 KB are the four ports' receive rings; about 24 KB of the 102 KB of
+RAM are left for the stack.
 
 `make hub CROSS=<prefix>` builds the same for the hub:
-text 42948, data 40, bss 30384 bytes; an image is 42 992 bytes.
+text 44960, data 40, bss 38824 bytes; an image is 45 004 bytes.
 
 A slot takes an image of up to 122 880 bytes (120 KB; the slot's last
 sector is kept for what the bootloader remembers of it). A factory file is
@@ -84,7 +97,7 @@ sector is kept for what the bootloader remembers of it). A factory file is
 | file | what |
 |---|---|
 | `port/at32f405/port` | clock (216 MHz from 12 MHz), ms time, pins, chip ID, reboot, the watchdog, the word that asks the bootloader for the ROM |
-| `port/at32f405/uart` | a UART with DMA both ways and the pin swap |
+| `port/at32f405/uart` | a UART with DMA both ways, the pin swap and the change of speed |
 | `port/at32f405/flash` | the record in the last 2 KB sector; erasing and writing the slot that is not running |
 | `port/at32f405/i2c` | I2C1 at 10 kHz for the CH224A (`i2c1_start`, `i2c1_xfer`) |
 | `port/at32f405/sections.ld`, `slot_a.ld`, `slot_b.ld`, `boot.ld` | where things are linked: one program for each slot, and the bootloader |
@@ -102,6 +115,12 @@ untested".
 
 - **Everything on hardware.** No board exists; the first one will show
   which of the register-level guesses were wrong.
+- **4 Mbaud on a cable.** The agreement is tested on a PC; the UART at
+  4 Mbaud, the change of its speed between two frames and the cable itself
+  are not. `DESIGN.md`, "What is left for later", lists what to look at on
+  the first boards. If 4 Mbaud turns out badly, `RATE_MAX` in
+  `core/proto.h` set to `RATE_1M` gives programs that stay at 1 Mbaud, and
+  they go in through the hub.
 - **An update through the hub, on hardware.** `tools/update.py`, the
   bootloader and `core/fw.c` are tested as far as a PC goes. Not known
   until a hub and some tiles exist: whether the bootloader starts a program
@@ -150,4 +169,8 @@ untested".
   of them with `fw.h`.
 - An update is the old hub sending and the new hub confirming. A change to
   the frames or to the `fw` console lines has to keep that working across
-  one version, or say in its notes how to get across.
+  one version, or say in its notes how to get across. Version 0002 (the
+  two rates) kept it: `HELLO` and `INFO` grew at their ends, and 0001 reads
+  what it knows of them.
+- `tests/test_update.py` makes its builds at versions 0102 and 0103, away
+  from `FW_VERSION`, so the next change of that number does not meet them.

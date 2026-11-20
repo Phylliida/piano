@@ -36,8 +36,8 @@ on.
 
 ## Link: one cable
 
-- UART, 8N1, 1 Mbaud, idle high. Each side enables a pull-up on its receive
-  pin.
+- UART, 8N1, idle high, at 1 Mbaud or at 4 Mbaud ("How fast", below). Each
+  side enables a pull-up on its receive pin.
 - A frame on the wire is `COBS(body) 0x00`. `body = type, payload, crc`.
   The CRC is CRC-16/CCITT-FALSE (polynomial 0x1021, start 0xFFFF) over type
   and payload, low byte first. Payload is at most 60 bytes. A frame that
@@ -74,12 +74,122 @@ USART's `TRPSWAP` bit) and tries again:
 | 1 | kind: 0 tile, 1 hub |
 | 4 | sender's ID |
 | 1 | sender's port: 0 W, 1 N, 2 E, 3 S; the hub's port is 0 |
+| 1 | the cable's rate: see "How fast" |
 
 A node's ID is the 32-bit FNV-1a hash of its 96-bit chip ID. 0 and
 0xFFFFFFFF are not used as IDs.
 
 From the HELLOs, each tile knows who is on each of its ports, and tells the
 hub (`INFO`). Tiles know nothing about coordinates.
+
+A program from before the two rates (firmware version 0001) sends the first
+seven bytes and reads no more than those. A `HELLO` of seven bytes is read
+as one whose last byte is 0.
+
+### How fast
+
+A cable runs at 1 Mbaud, the *base rate*, or at 4 Mbaud. Every port starts
+at the base rate, and whoever is plugged in is found there. Two ports that
+hear each other and both offer more go to the faster rate together. Each
+cable does that by itself: a keyboard can have cables at both rates.
+
+All of it is said in `HELLO`'s last byte:
+
+| bits | name | meaning |
+|---|---|---|
+| 0-1 | can | the fastest rate the sender's port offers: 0 is 1 Mbaud, 1 is 4 Mbaud. In a GO: the rate gone to |
+| 2-3 | now | the rate this `HELLO` is sent at |
+| 5 | BACK | "I am at the base rate again and have not heard you here" |
+| 6 | ASK | "answer this" |
+| 7 | GO | "the last thing I say at this rate" |
+
+A `HELLO` whose *now* is not the rate of the port that hears it waited in a
+UART while the rate changed: what it says about rates is ignored. A rate
+code this program does not know counts as the fastest it knows.
+
+Of the two ends, the one with the lower ID asks. Call it L and the other F:
+
+1. L's port is up, at the base rate, and has heard that F offers more, as L
+   does. L sends a `HELLO` with ASK. From now on L sends nothing but
+   `HELLO`s on this port: everything else waits in its queue.
+2. F answers with a `HELLO` with GO, where *can* is the fastest rate both
+   offer. It is the last frame F sends at the base rate: when its last bit
+   is out, F's UART is at the new rate. There F listens and says nothing.
+3. L hears the GO, sets its UART to the new rate, gives F 2 ms to be there,
+   and *calls*: a `HELLO` with ASK, every 2 ms.
+4. F hears a call. Now F knows that it hears L at this rate, and answers
+   with a `HELLO` with ASK, every 2 ms.
+5. L hears a `HELLO` at the new rate. F was silent until it heard a call,
+   so L knows that F hears it, and that it hears F. L sends a plain `HELLO`
+   and then its queue.
+6. F hears a plain `HELLO`: L hears it. F sends its queue.
+
+So neither end sends anything but `HELLO`s at a rate before it knows that
+the other end hears it there, and no frame is lost to the change. Between
+healthy ports all of this takes a few milliseconds. In the simulator a
+3 x 3 keyboard has its thirteen cables at 4 Mbaud 0.4 s after its start,
+without one bad frame.
+
+What can go wrong, and what then:
+
+- **No GO within 5 ms of the asking.** The asking was lost, or F's program
+  stood still (below), or the GO was lost, and then F is at the faster rate
+  and hears nothing said at this one. L stays at the base rate, keeps its
+  queue held and says `HELLO` with BACK every 2 ms, until it hears a
+  `HELLO` at the base rate or 150 ms have passed. This is no try that
+  failed: it says nothing about the cable. L asks again 2 s later. (F,
+  behind a GO that was lost, is not called, and counts a try that failed:
+  it cannot tell the two apart.)
+- **Not through step 5 or 6 within 100 ms of the change.** A try that
+  failed. The end goes back to the base rate and does as above: `HELLO`
+  with BACK every 2 ms, its queue held, until the other end is heard there
+  or 150 ms have passed, which is longer than the other end's 100 ms. An
+  end at the base rate that hears BACK answers with a `HELLO` at once.
+- **The link goes down at the faster rate** (nothing good heard for
+  350 ms): back to the base rate, and a whole dwell of listening there
+  before the pins are swapped. If the faster rate had lasted less than a
+  second, this counts as a try that failed too.
+- **After a try that failed** the next comes 2 s later. After four in a row
+  with the same neighbour the port offers the base rate and nothing else,
+  until its node restarts or another neighbour is on the cable. A faster
+  rate that lasts a second clears the count.
+
+F answers an asking with GO only if its program is running freely: its last
+two rounds of the main loop were less than 3 ms apart. A program that stood
+still, for a flash erase, may be reading an asking from a while ago, and L
+does not wait for ever. A GO that came when L had stopped waiting would
+find it sending frames at the base rate again, and they would be lost. So
+there is none, and L asks again in 2 s. (A GO that is late by less, because
+F stood still behind reading the asking, finds L still holding its queue,
+and L follows it.)
+
+What this costs. While a try fails, what wants through that cable waits for
+about 100 ms, the keys' notes too; nothing is dropped unless a queue fills.
+That happens at most four times, 2 s apart, with one neighbour. A lost
+asking costs 5 to 11 ms, a lost GO about 100 ms.
+
+What it does not do:
+
+- It does not watch a cable that works at 4 Mbaud but badly. Such a cable
+  shows in the bad-frame counters (`stats`, `info <tile>`), and stays at
+  4 Mbaud as long as the link stays up. The remedy is `RATE_MAX` in
+  `core/proto.h`: a program built with `RATE_1M` there offers no more, and
+  goes in through the hub like any other.
+- A node that restarts says nothing first. Its neighbours' ports hear
+  rubbish at 4 Mbaud until their links go down, up to 350 ms, and count it
+  as bad frames.
+- A program from before the two rates never asks and is never asked: its
+  `HELLO`s offer the base rate. The newer neighbour says so in `INFO`.
+
+The hub's one port does the same. When the hub lends its cable to
+`bridge`, the link starts afresh at the base rate afterwards.
+
+The port code reads the link's rate and sets the UART to it only while the
+transmitter is idle, before it asks for the next frame: so a GO leaves at
+the old rate, whole, and what follows it leaves at the new one. Bytes that
+were received and not yet read stay: they came at the old rate. A program
+that stands still right behind its GO sets its UART late, and hears the
+first calls as rubbish; that is what the calls go on for.
 
 ## Network: many tiles, one hub
 
@@ -156,14 +266,21 @@ the `NOTE` could not be sent. More than 28 changed depths go out in turn,
 over several `POS` frames. Each tile starts its `STATE` and `INFO` timers at
 a random moment, so that the tiles of a keyboard do not all send at once.
 
-`INFO`, 33 bytes: firmware version (2), flags (1: bit 0 = every key's bottom
+`INFO`, 35 bytes: firmware version (2), flags (1: bit 0 = every key's bottom
 has been measured, bit 1 = calibrating now, bit 2 = raw mode, bit 3 = the
 program runs from slot B, bit 4 = it is on trial, bit 5 = a new program
 waits for the next restart; see Firmware update), columns (1),
 rows (1), parent port (1, 0xFF = none), hops (1, 0xFF = none), then for each
 port W, N, E, S: the neighbour's ID (4, 0 = nobody) and the neighbour's port
 (1); then seconds since start (2, stops at 65535), frames dropped for a bad
-CRC (2), frames dropped from a full queue (2).
+CRC (2), frames dropped from a full queue (2); then the ports' rates (1: two
+bits a port, W in bits 0-1, with the rate's code from "How fast") and why a
+port is not faster (1: two bits a port; 0 = it is, or nobody is there, or
+the asking is still to come, 1 = the neighbour offers no more, 2 = a try
+failed and the next is to come, 3 = four tries failed). A program from
+before the two rates sends 33 bytes, and the hub takes that as every port
+at 1 Mbaud with nothing to say about it. The firmware version is 0002 from
+the two rates on.
 
 `STATE` is what makes lost frames harmless: the hub compares each bitmap
 with what it believes. A key the hub holds on that two bitmaps in a row
@@ -609,7 +726,13 @@ it is untested.
   timer after the chip stood still (a flash write).
 - UARTs send and receive by DMA: received bytes land in a ring that the main
   loop empties, so nothing is lost while an interrupt or a flash write holds
-  the program up.
+  the program up. A ring is 16 KB: at 4 Mbaud a cable brings 14 400 bytes
+  in the 36 ms of two sector erases. A tile has four rings, 64 KB of its
+  102 KB.
+- A UART's rate is changed with the UART switched off for the moment, and
+  only while its transmitter is idle; the receiving DMA and its place in
+  the ring stay as they are. The dividers are whole numbers at both rates:
+  108 MHz / 27 and 216 MHz / 54 for 4 Mbaud.
 - A program starts at its slot's address, not at the start of the flash:
   the bootloader loads the stack pointer and the start address from the
   slot's first two words, and the program points the vector table register
@@ -639,5 +762,15 @@ it is untested.
   BOOT0 wire: the pads have to be bridged once (unless a blank chip starts
   its ROM by itself, which nobody has checked). A way to do that from the
   cable would be a change to the tile's board.
+- 4 Mbaud on real cables. The data lines have 220 ohm in series at each
+  end and nothing else, and the dividers are exact, so on paper it works.
+  To look at on the first boards: both data lines on a scope, on a cable
+  each way round and on the hub's cable; that the bad-frame counters stay
+  at 0 with every key moving and `pos` on; how long a round of the first
+  tile's main loop takes with the hub's cable full; that nothing is lost
+  while a tile erases flash under that load.
+- Going back to 1 Mbaud by agreement when a cable at 4 Mbaud drops frames;
+  a console command that caps a keyboard's rate; a word from a node that
+  is about to restart, so that its neighbours need not find out.
 - More than one hub.
 - MPE and other tunings than twelve notes to the octave.
