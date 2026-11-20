@@ -26,6 +26,9 @@ typedef struct {
     uint8_t flags, cols, rows, parent, hops;
     uint32_t nbr_id[TILE_PORTS];
     uint8_t nbr_port[TILE_PORTS];
+    bool old;                   /* its program is from before the two rates: short HELLO and INFO */
+    uint8_t hello_flags;        /* HELLO's last byte */
+    uint8_t rates, slow;        /* INFO's last two */
 
     int heard;                  /* commands for it that came */
     int runs;                   /* ... and were new, so it ran them */
@@ -87,7 +90,8 @@ static void send_hello(int i)
     uint8_t pl[HELLO_LEN], wire[FRAME_MAX_WIRE];
 
     link_hello_payload(pl, KIND_TILE, fake[i].id, PORT_E);
-    size_t w = frame_encode(FT_HELLO, pl, HELLO_LEN, wire);
+    pl[7] = fake[i].hello_flags;
+    size_t w = frame_encode(FT_HELLO, pl, fake[i].old ? HELLO_MIN_LEN : HELLO_LEN, wire);
     hub_rx(&h, wire, w, now);
 }
 
@@ -109,7 +113,9 @@ static void send_info(int i)
     put16(b + 27, 12);
     put16(b + 29, 3);
     put16(b + 31, 4);
-    up(f->id, FT_INFO, b, sizeof b);
+    b[33] = f->rates;
+    b[34] = f->slow;
+    up(f->id, FT_INFO, b, f->old ? INFO_MIN_LEN - UP_HEAD_LEN : sizeof b);
 }
 
 static void state_raw(int i, uint8_t counter, const uint8_t bitmap[5])
@@ -326,6 +332,7 @@ static void start(int n)
         f->rows = KEYS_ROWS;
         f->parent = PORT_NONE;
         f->hops = 0xFF;
+        f->old = true;          /* most tests are not about rates */
     }
     if (n)
         set_root(0);
@@ -611,7 +618,8 @@ static void grid_3x3(void)
     CHECK_EQ(h.nproblems, 0);
 
     say("grid");
-    CHECK(said("hub on tile 5\r\n3 x 3\r\n  6  7  8\r\n  3  4  5\r\n  0  1  2\r\nok\r\n"));
+    CHECK(said("hub on tile 5\r\n3 x 3\r\n  6  7  8\r\n  3  4  5\r\n  0  1  2\r\n"
+               "slow: the hub to tile 5 port E, 1 Mbaud: tile 5 offers no more\r\nok\r\n"));
 
     /* the hub's cable moves to the bottom left tile: same picture */
     set_root(0);
@@ -1004,7 +1012,7 @@ static void console_basics(void)
     CHECK(ends("ok"));
 
     say("version");
-    snprintf(want, sizeof want, "piano hub, firmware 0001, protocol 1, id %08x\r\nok\r\n",
+    snprintf(want, sizeof want, "piano hub, firmware 0002, protocol 1, id %08x\r\nok\r\n",
              (unsigned)h.node.id);
     CHECK(!strcmp(text, want));
 
@@ -1052,25 +1060,26 @@ static void console_basics(void)
     CHECK(said("piano hub"));
 
     say("tiles");
-    snprintf(want, sizeof want, "0 %08x at 1,0 parent E hops 0 fw 0001\r\n", (unsigned)fake[0].id);
+    snprintf(want, sizeof want, "0 %08x at 1,0 parent E hops 0 fw 0002\r\n", (unsigned)fake[0].id);
     CHECK(said(want));
-    snprintf(want, sizeof want, "1 %08x at 0,0 parent E hops 1 fw 0001 calibrated raw\r\n",
+    snprintf(want, sizeof want, "1 %08x at 0,0 parent E hops 1 fw 0002 calibrated raw\r\n",
              (unsigned)fake[1].id);
     CHECK(said(want));
-    snprintf(want, sizeof want, "2 %08x unplaced parent - fw 0001\r\n", (unsigned)fake[2].id);
+    snprintf(want, sizeof want, "2 %08x unplaced parent - fw 0002\r\n", (unsigned)fake[2].id);
     CHECK(said(want));
     CHECK(ends("ok"));
     CHECK(said("3 tiles\r\n"));
 
     say("grid");
-    CHECK(!strcmp(text, "hub on tile 0\r\n2 x 1\r\n  1  0\r\nunplaced: 2\r\nok\r\n"));
+    CHECK(!strcmp(text, "hub on tile 0\r\n2 x 1\r\n  1  0\r\nunplaced: 2\r\n"
+                        "slow: the hub to tile 0 port E, 1 Mbaud: tile 0 offers no more\r\nok\r\n"));
 
     note(0, 3, true, 1000);
     say("info 0");
     snprintf(want, sizeof want, "tile 0 id %08x at 1,0\r\n", (unsigned)fake[0].id);
     CHECK(said(want));
     CHECK(said(" ms ago, 1 keys down\r\n"));
-    CHECK(said("firmware 0001, 8 x 5 keys, not calibrated\r\n"));
+    CHECK(said("firmware 0002, 8 x 5 keys, not calibrated\r\n"));
     CHECK(said("to the hub: port E, 0 tiles between\r\n"));
     CHECK(said("W: tile 1 port E\r\nN: nobody\r\nE: the hub\r\nS: nobody\r\n"));
     CHECK(said("up 12 s, 3 bad frames, 4 frames dropped from a full queue\r\nok\r\n"));
@@ -1124,6 +1133,106 @@ static void console_basics(void)
     drain();
     CHECK_EQ(ntext, 0);
     CHECK_EQ(nmidi, 60);
+}
+
+/* What the hub knows and says about the cables' rates. */
+static void rates(void)
+{
+    const uint8_t at4 = RATE_4M << 2;
+    const link_t *l = &h.node.port[0].link;
+
+    /* tile 2 - tile 1 - tile 0 - hub. Tile 2 has an old program. */
+    start(3);
+    cable(0, PORT_W, 1, PORT_E);
+    cable(1, PORT_W, 2, PORT_E);
+    fake[1].parent = fake[2].parent = PORT_E;
+    fake[1].hops = 1;
+    fake[2].hops = 2;
+    fake[0].old = fake[1].old = false;
+    settle();
+    CHECK(T(0)->have_rates && T(1)->have_rates && !T(2)->have_rates);
+    CHECK_EQ(hub_rate(&h), RATE_1M);
+
+    /* The tile on the cable asks for more: the hub says GO, waits to be
+     * called at the new rate, answers, and is told that it was heard. */
+    fake[0].hello_flags = RATE_4M | HELLO_ASK;
+    send_hello(0);
+    drain();
+    CHECK_EQ(hub_rate(&h), RATE_4M);
+    CHECK(link_holds(l));
+    fake[0].hello_flags = at4 | RATE_4M | HELLO_ASK;
+    send_hello(0);
+    drain();
+    CHECK(link_holds(l));
+    fake[0].hello_flags = at4 | RATE_4M;
+    send_hello(0);
+    drain();
+    CHECK(!link_holds(l));
+    CHECK_EQ(hub_rate(&h), RATE_4M);
+
+    /* 0 to 1: tried four times. 1 to 2: tile 2 offers no more. */
+    fake[0].rates = RATE_4M << (2 * PORT_E);
+    fake[0].slow = SLOW_GAVE_UP << (2 * PORT_W);
+    fake[1].slow = (SLOW_GAVE_UP << (2 * PORT_E)) | (SLOW_NBR << (2 * PORT_W));
+    for (int i = 0; i < 3; i++)
+        send_info(i);
+    run(3);
+
+    say("stats");
+    CHECK(said("cable: 0 bad frames, 0 dropped from a full queue, 4 Mbaud\r\n"));
+    say("info 0");
+    CHECK(said("W: tile 1 port E, 1 Mbaud: 4 tries at more failed\r\nN: nobody\r\n"
+               "E: the hub, 4 Mbaud\r\nS: nobody\r\n"));
+    say("info 1");
+    CHECK(said("W: tile 2 port E, 1 Mbaud: tile 2 offers no more\r\nN: nobody\r\n"
+               "E: tile 0 port W, 1 Mbaud: 4 tries at more failed\r\nS: nobody\r\n"));
+    say("info 2");
+    CHECK(said("W: nobody\r\nN: nobody\r\nE: tile 1 port W\r\nS: nobody\r\n"));
+    say("tiles");
+    CHECK(said(" parent E hops 0 fw 0002 W at 1 Mbaud\r\n"));
+    CHECK(said(" parent E hops 1 fw 0002 W at 1 Mbaud E at 1 Mbaud\r\n"));
+    CHECK(said(" parent E hops 2 fw 0002\r\n"));
+    /* each cable once; of two ends that say the same, one speaks */
+    say("grid");
+    CHECK_EQ(times_said("slow: "), 2);
+    CHECK(said("slow: tile 0 port W to tile 1 port E, 1 Mbaud: 4 tries at more failed\r\n"));
+    CHECK(said("slow: tile 1 port W to tile 2 port E, 1 Mbaud: tile 2 offers no more\r\n"));
+
+    /* ... and of two that do not, the one that knows more */
+    fake[0].slow = SLOW_NBR << (2 * PORT_W);
+    fake[1].slow = SLOW_RETRY << (2 * PORT_E);
+    fake[1].rates = RATE_4M << (2 * PORT_W);
+    send_info(0);
+    send_info(1);
+    run(3);
+    say("grid");
+    CHECK_EQ(times_said("slow: "), 1);
+    CHECK(said("slow: tile 1 port E to tile 0 port W, 1 Mbaud: a try at more failed, "
+               "the next is to come\r\n"));
+
+    /* The hub's own cable. It says GO, and nobody calls. */
+    start(1);
+    fake[0].old = false;
+    settle();
+    fake[0].hello_flags = RATE_4M | HELLO_ASK;
+    send_hello(0);
+    fake[0].hello_flags = RATE_4M;
+    drain();
+    CHECK_EQ(hub_rate(&h), RATE_4M);
+    run(RATE_TRY_MS + 2);
+    CHECK_EQ(hub_rate(&h), RATE_1M);
+    CHECK(l->up);
+    say("stats");
+    CHECK(said("from a full queue, 1 Mbaud: a try at more failed, the next is to come\r\n"));
+    say("grid");
+    CHECK(said("  0\r\nslow: the hub to tile 0 port E, 1 Mbaud: a try at more failed, "
+               "the next is to come\r\nok\r\n"));
+    /* the tile knows more */
+    fake[0].slow = SLOW_GAVE_UP << (2 * PORT_E);
+    send_info(0);
+    run(3);
+    say("grid");
+    CHECK(said("  0\r\nslow: tile 0 port E to the hub, 1 Mbaud: 4 tries at more failed\r\nok\r\n"));
 }
 
 static void settings(void)
@@ -2247,10 +2356,10 @@ static void firmware(void)
     fake[1].flags = INFO_STAGED;
     settle();
     say("tiles");
-    CHECK(said(" fw 0001 calibrated trial\r\n"));
-    CHECK(said(" fw 0001 staged\r\n"));
+    CHECK(said(" fw 0002 calibrated trial\r\n"));
+    CHECK(said(" fw 0002 staged\r\n"));
     say("info 0");
-    CHECK(said("firmware 0001, 8 x 5 keys, calibrated trial\r\n"));
+    CHECK(said("firmware 0002, 8 x 5 keys, calibrated trial\r\n"));
 
     /* no tiles */
     start(0);
@@ -2478,6 +2587,7 @@ int main(void)
     RUN(state_heals);
     RUN(aftertouch);
     RUN(console_basics);
+    RUN(rates);
     RUN(settings);
     RUN(commands);
     RUN(counters);

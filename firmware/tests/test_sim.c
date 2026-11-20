@@ -171,6 +171,16 @@ static void grid(int w, int h, uint32_t crossed)
     hubcab = sim_cable(&s, SIM_HUB, 0, w - 1, PORT_E, (crossed >> bit) & 1u);
 }
 
+/* No tile offers more than the base rate, so every cable stays at it.
+ * (Until a tile starts again.) For right after grid(). */
+static void slow_cables(void)
+{
+    for (int i = 0; i < s.ntiles; i++) {
+        for (uint8_t p = 0; p < TILE_PORTS; p++)
+            T(i)->node.port[p].link.rate_max = RATE_BASE;
+    }
+}
+
 /* ------------------------------------------------------ what should be so --- */
 
 static int dist[SIM_MAX_TILES];         /* cables between a tile and the hub's tile; -1: no way */
@@ -1105,13 +1115,14 @@ static void commands(void)
     CHECK_EQ(lines_with("tile "), 1);
 }
 
-/* Four tiles in a row all streaming their ADC values: far more than the
- * cable carries. What gives way is the stream; notes, STATE, INFO, replies
- * and commands all get through. */
+/* Four tiles in a row all streaming their ADC values: far more than a
+ * cable at 1 Mbaud carries. What gives way is the stream; notes, STATE,
+ * INFO, replies and commands all get through. */
 static void full_queues_drop_the_stream(void)
 {
     start(101);
     grid(4, 1, 0x05);
+    slow_cables();
     sim_run(&s, 3500);
     check_settled();
 
@@ -1156,7 +1167,7 @@ static void full_queues_drop_the_stream(void)
     CHECK_EQ(H()->stats.healed_on + H()->stats.healed_off, 0);
     CHECK_EQ(tap.dups, 0);
     /* Each tile offers 1000 frames a second, 8800 in all in this time; a
-     * cable carries under 2000 a second. The far tile's stream fits its
+     * cable at 1 Mbaud carries under 2000 a second. The far tile's stream fits its
      * cable; from there on the tiles have to choose. */
     CHECK_NEAR(tap.made[0][UP(FT_RAW)], 2200, 30);
     CHECK_EQ(T(0)->node.queue_drops, 0);
@@ -1696,11 +1707,11 @@ static void firmware_update(void)
     for (int i = 0; i < 4; i++) {
         was[i] = slot_crc(&s.tile[i].n, FW_SLOT_A);
         CHECK(was[i] != 0);
-        CHECK(has_linef("tile %d: runs a none 0001 %08x, other none -", hix(i), (unsigned)was[i]));
+        CHECK(has_linef("tile %d: runs a none 0002 %08x, other none -", hix(i), (unsigned)was[i]));
     }
     SAY_OK("fw hub");
     was[4] = slot_crc(&s.hub.n, FW_SLOT_A);
-    CHECK(has_linef("hub: runs a none 0001 %08x, other none -", (unsigned)was[4]));
+    CHECK(has_linef("hub: runs a none 0002 %08x, other none -", (unsigned)was[4]));
 
     for (int round = 0; round < 2; round++) {
         uint8_t to = round ? FW_SLOT_A : FW_SLOT_B;
@@ -1875,8 +1886,8 @@ static void firmware_goes_back(void)
     sim_run(&s, 4000);
     check_settled();
     SAY_OK("fw all");
-    CHECK(has_linef("tile %d: runs a none 0001 %08x, other tried %08x", hix(0), (unsigned)was[0], (unsigned)crc[0]));
-    CHECK(has_linef("tile %d: runs a none 0001 %08x, other tried %08x", hix(1), (unsigned)was[1], (unsigned)crc[1]));
+    CHECK(has_linef("tile %d: runs a none 0002 %08x, other tried %08x", hix(0), (unsigned)was[0], (unsigned)crc[0]));
+    CHECK(has_linef("tile %d: runs a none 0002 %08x, other tried %08x", hix(1), (unsigned)was[1], (unsigned)crc[1]));
     CHECK(has_linef("tile %d: runs b good 0102 %08x, other none %08x", hix(2), (unsigned)crc[2], (unsigned)was[2]));
     CHECK_EQ(s.tile[2].n.reboots, 1);
     CHECK_EQ(s.tile[0].n.reboots, 1);
@@ -1911,7 +1922,7 @@ static void firmware_goes_back(void)
         CHECK(!s.tile[i].n.trial);
     }
     SAY_OK("fw %s", id_of(0));
-    CHECK(has_linef("tile %d: runs a none 0001 %08x, other tried %08x", hix(0), (unsigned)was[0], (unsigned)crc[0]));
+    CHECK(has_linef("tile %d: runs a none 0002 %08x, other tried %08x", hix(0), (unsigned)was[0], (unsigned)crc[0]));
 
     /* After all that a tile still takes a program and keeps it. */
     crc[0] = make_program(KIND_TILE, FW_SLOT_B, V_NEW + 1, SIM_ACT_RUN, 1830);
@@ -1936,7 +1947,7 @@ static void firmware_goes_back(void)
     CHECK_EQ(s.hub.n.slot, FW_SLOT_A);
     check_settled();
     SAY_OK("fw hub");
-    CHECK(has_linef("hub: runs a none 0001 %08x, other tried %08x", (unsigned)was[3], (unsigned)crc[3]));
+    CHECK(has_linef("hub: runs a none 0002 %08x, other tried %08x", (unsigned)was[3], (unsigned)crc[3]));
 
     /* One that hears neither the cable nor the computer. */
     crc[3] = make_program(KIND_HUB, FW_SLOT_B, V_NEW, SIM_ACT_DEAF, 1841);
@@ -1969,7 +1980,7 @@ static void firmware_goes_back(void)
     CHECK_EQ(s.hub.n.reboots, boots + 1);
     check_settled();
     SAY_OK("fw hub");
-    CHECK(has_linef("hub: runs a none 0001 %08x, other tried %08x", (unsigned)was[3], (unsigned)crc[3]));
+    CHECK(has_linef("hub: runs a none 0002 %08x, other tried %08x", (unsigned)was[3], (unsigned)crc[3]));
 
     /* And one that is. */
     crc[3] = make_program(KIND_HUB, FW_SLOT_B, V_NEW + 1, SIM_ACT_RUN, 1843);
@@ -2028,7 +2039,7 @@ static void firmware_power_cut(void)
     check_settled();
     CHECK_EQ(s.tile[0].n.slot, FW_SLOT_A);
     SAY_OK("fw %s", id_of(0));
-    CHECK(has_linef("tile %d: runs a none 0001 %08x, other partial -", hix(0), (unsigned)was[0]));
+    CHECK(has_linef("tile %d: runs a none 0002 %08x, other partial -", hix(0), (unsigned)was[0]));
     /* the tile does not go on where it was: it knows nothing of it */
     say_write(id_of(0), 2400, FW_CHUNK);
     CHECK(has_linef("tile %d: failed, at 0", hix(0)));
@@ -2047,7 +2058,7 @@ static void firmware_power_cut(void)
     CHECK_EQ(s.tile[0].n.slot, FW_SLOT_A);
     CHECK(!s.tile[0].n.trial);
     SAY_OK("fw %s", id_of(0));
-    CHECK(has_linef("tile %d: runs a none 0001 %08x, other partial %08x", hix(0), (unsigned)was[0], (unsigned)crc));
+    CHECK(has_linef("tile %d: runs a none 0002 %08x, other partial %08x", hix(0), (unsigned)was[0], (unsigned)crc));
 
     /* The hub goes (its plug was pulled) with a tile half way. The tile
      * waits; whoever comes back can go on from where it says it is. */
@@ -2059,7 +2070,7 @@ static void firmware_power_cut(void)
     sim_run(&s, 4000);
     check_settled();
     SAY_OK("fw %s", id_of(1));
-    CHECK(has_linef("tile %d: runs a none 0001 %08x, other partial -, receiving at 1440", hix(1), (unsigned)was[1]));
+    CHECK(has_linef("tile %d: runs a none 0002 %08x, other partial -, receiving at 1440", hix(1), (unsigned)was[1]));
     say_write(id_of(1), 0, FW_CHUNK);
     CHECK(has_linef("tile %d: value not allowed, at 1440", hix(1)));
     CHECK(send_pieces(id_of(1), 1440, PROG_LEN));
@@ -2078,7 +2089,7 @@ static void firmware_power_cut(void)
     CHECK_EQ(s.tile[1].n.slot, FW_SLOT_A);
     CHECK(!s.tile[1].n.trial);
     SAY_OK("fw %s", id_of(1));
-    CHECK(has_linef("tile %d: runs a none 0001 %08x, other tried %08x", hix(1), (unsigned)was[1], (unsigned)crc));
+    CHECK(has_linef("tile %d: runs a none 0002 %08x, other tried %08x", hix(1), (unsigned)was[1], (unsigned)crc));
 
     /* The hub's own, in the middle of the image. */
     crc = make_program(KIND_HUB, FW_SLOT_B, V_NEW, SIM_ACT_RUN, 1920);
@@ -2092,7 +2103,7 @@ static void firmware_power_cut(void)
     check_settled();
     CHECK_EQ(s.hub.n.slot, FW_SLOT_A);
     SAY_OK("fw hub");
-    CHECK(has_linef("hub: runs a none 0001 %08x, other partial -", (unsigned)was[2]));
+    CHECK(has_linef("hub: runs a none 0002 %08x, other partial -", (unsigned)was[2]));
 
     /* Sent again from the start, each of them takes it. */
     CHECK(send_program("hub"));
@@ -2134,7 +2145,7 @@ static void firmware_refused(void)
     CHECK(has_linef("tile %d: failed, at 0", hix(0)));
     CHECK(has_line("error: 1 failed"));
     SAY_OK("fw %s", id_of(0));
-    CHECK(has_linef("tile %d: runs a none 0001 %08x, other partial %08x", hix(0), (unsigned)was, (unsigned)crc));
+    CHECK(has_linef("tile %d: runs a none 0002 %08x, other partial %08x", hix(0), (unsigned)was, (unsigned)crc));
     make_program(KIND_TILE, FW_SLOT_B, V_NEW, SIM_ACT_RUN, 2011);
     CHECK(!send_program("hub"));
     CHECK(has_line("hub: failed, at 0"));
@@ -2153,7 +2164,7 @@ static void firmware_refused(void)
     CHECK(!send_program(id_of(1)));
     CHECK(has_linef("tile %d: failed, at 0", hix(1)));
     SAY_OK("fw %s", id_of(1));
-    CHECK(has_linef("tile %d: runs a none 0001 %08x, other partial -", hix(1),
+    CHECK(has_linef("tile %d: runs a none 0002 %08x, other partial -", hix(1),
                     (unsigned)slot_crc(&s.tile[1].n, FW_SLOT_A)));
 
     /* not all of it; a piece twice; a piece left out */
@@ -2258,7 +2269,7 @@ static void power_through_the_hub(void)
     sim_run(&s, 4000);
     check_settled();
     SAY_OK("fw %s", id_of(1));
-    CHECK(has_linef("tile %d: runs a none 0001 %08x, other partial -", hix(1), (unsigned)was[1]));
+    CHECK(has_linef("tile %d: runs a none 0002 %08x, other partial -", hix(1), (unsigned)was[1]));
     say_write(id_of(1), 1440, FW_CHUNK);
     CHECK(has_linef("tile %d: failed, at 0", hix(1)));
 
@@ -2286,7 +2297,7 @@ static void power_through_the_hub(void)
     CHECK(s.tile[0].n.trial);
     SAY_OK("fw all");
     CHECK(has_linef("tile %d: runs b tried 0102 %08x, other none %08x", hix(0), (unsigned)crc[0], (unsigned)was[0]));
-    CHECK(has_linef("tile %d: runs a none 0001 %08x, other tried %08x", hix(1), (unsigned)was[1], (unsigned)crc[1]));
+    CHECK(has_linef("tile %d: runs a none 0002 %08x, other tried %08x", hix(1), (unsigned)was[1], (unsigned)crc[1]));
 
     /* Confirmed, it stays through the hub's next restart. */
     SAY_OK("fw %s confirm", id_of(0));
@@ -2295,7 +2306,7 @@ static void power_through_the_hub(void)
     check_settled();
     SAY_OK("fw all");
     CHECK(has_linef("tile %d: runs b good 0102 %08x, other none %08x", hix(0), (unsigned)crc[0], (unsigned)was[0]));
-    CHECK(has_linef("tile %d: runs a none 0001 %08x, other tried %08x", hix(1), (unsigned)was[1], (unsigned)crc[1]));
+    CHECK(has_linef("tile %d: runs a none 0002 %08x, other tried %08x", hix(1), (unsigned)was[1], (unsigned)crc[1]));
 
     /* A new program for the hub that hangs: no tile has power until the
      * watchdog has brought the old one back. */
@@ -2310,7 +2321,7 @@ static void power_through_the_hub(void)
     CHECK_EQ(s.hub.n.slot, FW_SLOT_A);
     check_settled();
     SAY_OK("fw hub");
-    CHECK(has_linef("hub: runs a none 0001 %08x, other tried %08x", (unsigned)was[2], (unsigned)crc[2]));
+    CHECK(has_linef("hub: runs a none 0002 %08x, other tried %08x", (unsigned)was[2], (unsigned)crc[2]));
 
     /* The hub in its ROM feeds nobody either, for as long as it sits there. */
     SAY_OK("bootloader hub");
@@ -2378,6 +2389,703 @@ static void power_through_the_hub(void)
     }
 }
 
+/* ---------------------------------------------------------------- how fast --- */
+
+static link_t *cable_link(int c, int end)
+{
+    int n = s.cable[c].node[end];
+
+    return n == SIM_HUB ? &H()->node.port[0].link : &T(n)->node.port[s.cable[c].port[end]].link;
+}
+
+static const sim_port_t *cable_port(int c, int end)
+{
+    int n = s.cable[c].node[end];
+
+    return n == SIM_HUB ? &s.hub.port[0] : &s.tile[n].port[s.cable[c].port[end]];
+}
+
+/* Both ends of a cable are up and at `rate`, the programs and the UARTs,
+ * and neither is in the middle of a change. */
+static bool cable_at(int c, uint8_t rate)
+{
+    for (int e = 0; e < 2; e++) {
+        const link_t *l = cable_link(c, e);
+
+        if (!l->up || l->rate != rate || cable_port(c, e)->rate != rate ||
+            l->rate_state != (rate == RATE_BASE ? RS_BASE : RS_FAST))
+            return false;
+    }
+    return true;
+}
+
+static int cables_at(uint8_t rate)
+{
+    int n = 0;
+
+    for (int c = 0; c < s.ncables; c++)
+        n += cable_at(c, rate);
+    return n;
+}
+
+/* Frames that came in broken, anywhere. */
+static unsigned bad_frames(void)
+{
+    unsigned n = H()->node.crc_drops;
+
+    for (int i = 0; i < s.ntiles; i++)
+        n += T(i)->node.crc_drops;
+    return n;
+}
+
+/* Run until every cable is at 4 Mbaud, `limit` ms at most. Returns how
+ * long it took. */
+static uint32_t until_all_fast(uint32_t limit)
+{
+    uint32_t ms = 0;
+
+    while (ms < limit && cables_at(RATE_4M) < s.ncables) {
+        sim_run(&s, 1);
+        ms++;
+    }
+    return ms;
+}
+
+/* A keyboard of tiles that all know both rates: every cable ends up at
+ * 4 Mbaud, and not a frame is spoilt on the way there. */
+static void every_cable_at_4_mbaud(void)
+{
+    start(301);
+    grid(3, 3, 0x0A5A);
+    uint32_t ms = until_all_fast(3500);
+    printf("  rates: 13 cables at 4 Mbaud %u ms after the start\n", (unsigned)ms);
+    CHECK(ms < 2500);
+    sim_run(&s, 3500 - ms);
+    check_settled();
+    CHECK_EQ(cables_at(RATE_4M), 13);
+    CHECK_EQ(bad_frames(), 0);
+    for (int c = 0; c < s.ncables; c++) {
+        for (int e = 0; e < 2; e++) {
+            CHECK_EQ(cable_link(c, e)->rate_fails, 0);
+            CHECK(cable_link(c, e)->proven);
+            CHECK_EQ(link_slow(cable_link(c, e)), SLOW_NOT);
+        }
+    }
+
+    SAY_OK("grid");
+    CHECK_EQ(lines_with("slow:"), 0);
+    SAY_OK("tiles");
+    CHECK(strstr(s.text, "Mbaud") == NULL);
+    SAY_OK("stats");
+    CHECK(has_line("cable: 0 bad frames, 0 dropped from a full queue, 4 Mbaud"));
+    SAY_OK("info %s", id_of(2));
+    CHECK(has_line("E: the hub, 4 Mbaud"));
+    CHECK(has_linef("W: tile %d port E, 4 Mbaud", hix(1)));
+    CHECK(has_linef("N: tile %d port S, 4 Mbaud", hix(5)));
+    CHECK(has_line("S: nobody"));
+
+    midi_clear();
+    tap_clear();
+    play(2000, 4);
+    for (int i = 0; i < 9; i++)
+        CHECK_EQ(tap.up[i][UP(FT_NOTE)], 10);   /* five times down and up */
+    CHECK_EQ(midi_count(0x90, -1), midi_count(0x80, -1));
+    CHECK_EQ(midi_sounding(), 0);
+    CHECK_EQ(H()->stats.notes_lost, 0);
+    CHECK_EQ(H()->stats.healed_on + H()->stats.healed_off, 0);
+    CHECK_EQ(tap.dups, 0);
+    CHECK_EQ(bad_frames(), 0);
+    CHECK_EQ(cables_at(RATE_4M), 13);
+}
+
+/* Four tiles in a row all streaming their ADC values, as in
+ * full_queues_drop_the_stream(): cables at 4 Mbaud carry all of it. */
+static void fast_cables_carry_the_streams(void)
+{
+    start(302);
+    grid(4, 1, 0x05);
+    sim_run(&s, 3500);
+    check_settled();
+    CHECK_EQ(cables_at(RATE_4M), 4);
+
+    SAY_OK("tset all rawinterval 2");
+    for (int i = 0; i < 4; i++) {
+        SAY_OK("adc %08x on", (unsigned)T(i)->node.id);
+        H()->stream_adc = 0;    /* the streams run; printing them would only fill the test's buffer */
+    }
+    sim_run(&s, 300);
+    tap_clear();
+    sim_run(&s, 2000);
+
+    unsigned raw_made = 0, raw_in = 0;
+    for (int i = 0; i < 4; i++) {
+        raw_made += tap.made[i][UP(FT_RAW)];
+        raw_in += tap.up[i][UP(FT_RAW)];
+        CHECK_EQ(T(i)->node.queue_drops, 0);
+    }
+    CHECK_NEAR(raw_made, 8000, 100);    /* 1000 frames a second from each */
+    CHECK(raw_made - raw_in < 40);      /* but for those on their way */
+    CHECK_EQ(bad_frames(), 0);
+    SAY_OK("ping all");
+    CHECK_EQ(lines_with("tile "), 4);
+    SAY_OK("adc off");
+    sim_run(&s, 200);
+    check_settled();
+}
+
+/* The console printed a line that starts with `head` and has `part` in it. */
+static bool line_has(const char *head, const char *part)
+{
+    size_t n = strlen(head), m = strlen(part);
+
+    for (const char *p = s.text, *e; (e = strstr(p, "\r\n")) != NULL; p = e + 2) {
+        if ((size_t)(e - p) < n || strncmp(p, head, n))
+            continue;
+        for (const char *q = p; q + m <= e; q++) {
+            if (!strncmp(q, part, m))
+                return true;
+        }
+    }
+    return false;
+}
+
+/* The start of a tile's line in `tiles`. */
+static const char *tiles_head(int i)
+{
+    static char text[2][24];
+    static int turn;
+    char *t = text[turn++ % 2];
+
+    snprintf(t, sizeof text[0], "%d %08x ", hix(i), (unsigned)T(i)->node.id);
+    return t;
+}
+
+/* A tile that still runs the program from before the two rates, between two
+ * that know both. Its cables stay at 1 Mbaud and everything works, the
+ * console says which cables and why, and a new program for it, sent over
+ * those cables, brings them to 4 Mbaud. Then a tile is given an old program. */
+static void old_tile_between_new_ones(void)
+{
+    start(303);
+    grid(3, 1, 0x02);
+    sim_factory(&s, 1, SIM_ACT_OLD);
+    sim_run(&s, 3500);
+    check_settled();
+    CHECK(cable_at(hubcab, RATE_4M));
+    CHECK(cable_at(ecab[0][0], RATE_BASE));
+    CHECK(cable_at(ecab[1][0], RATE_BASE));
+    CHECK_EQ(bad_frames(), 0);
+    for (int c = 0; c < s.ncables; c++) {       /* nobody tried */
+        CHECK_EQ(cable_link(c, 0)->rate_fails, 0);
+        CHECK_EQ(cable_link(c, 1)->rate_fails, 0);
+    }
+
+    SAY_OK("tiles");
+    CHECK(line_has(tiles_head(0), " fw 0002"));
+    CHECK(line_has(tiles_head(0), " E at 1 Mbaud"));
+    CHECK(line_has(tiles_head(1), " fw 0001"));
+    CHECK(!line_has(tiles_head(1), "Mbaud"));   /* it does not know of rates */
+    CHECK(line_has(tiles_head(2), " W at 1 Mbaud"));
+    CHECK(!line_has(tiles_head(2), " E at"));
+    SAY_OK("grid");
+    CHECK_EQ(lines_with("slow:"), 2);
+    CHECK(has_linef("slow: tile %d port E to tile %d port W, 1 Mbaud: tile %d offers no more", hix(0), hix(1),
+                    hix(1)));
+    CHECK(has_linef("slow: tile %d port W to tile %d port E, 1 Mbaud: tile %d offers no more", hix(2), hix(1),
+                    hix(1)));
+    SAY_OK("info %s", id_of(1));
+    CHECK_EQ(lines_with("firmware 0001, "), 1);
+    CHECK(has_linef("W: tile %d port E", hix(0)));
+    CHECK(has_linef("E: tile %d port W", hix(2)));
+    SAY_OK("info %s", id_of(0));
+    CHECK(has_linef("E: tile %d port W, 1 Mbaud: tile %d offers no more", hix(1), hix(1)));
+    SAY_OK("info %s", id_of(2));
+    CHECK(has_line("E: the hub, 4 Mbaud"));
+
+    midi_clear();
+    tap_clear();
+    play(2000, 4);
+    for (int i = 0; i < 3; i++)
+        CHECK_EQ(tap.up[i][UP(FT_NOTE)], 10);
+    CHECK_EQ(midi_sounding(), 0);
+    CHECK_EQ(H()->stats.notes_lost, 0);
+    CHECK_EQ(tap.dups, 0);
+    CHECK_EQ(bad_frames(), 0);
+
+    /* The new program for it goes through the hub and tile 2, at 1 Mbaud the last part. */
+    uint32_t was = slot_crc(&s.tile[1].n, FW_SLOT_A);
+    uint32_t crc = make_program(KIND_TILE, FW_SLOT_B, V_NEW, SIM_ACT_RUN, 3031);
+    CHECK(send_program(id_of(1)));
+    SAY_OK("reboot %s", id_of(1));
+    sim_run(&s, 4000);
+    check_settled();
+    CHECK_EQ(s.tile[1].n.slot, FW_SLOT_B);
+    CHECK_EQ(cables_at(RATE_4M), 3);
+    SAY_OK("fw %s confirm", id_of(1));
+    SAY_OK("fw %s", id_of(1));
+    CHECK(has_linef("tile %d: runs b good %04x %08x, other none %08x", hix(1), V_NEW, (unsigned)crc,
+                    (unsigned)was));
+    SAY_OK("grid");
+    CHECK_EQ(lines_with("slow:"), 0);
+    SAY_OK("tiles");
+    CHECK(strstr(s.text, "Mbaud") == NULL);
+    CHECK(line_has(tiles_head(1), " fw 0002"));   /* what runs here says this PC's number */
+    CHECK_EQ(H()->stats.silent, 0);
+    for (int i = 0; i < 3; i++)
+        CHECK_EQ(s.tile[i].n.rx_overruns, 0);
+
+    /* And the other way: tile 0 gets a program that knows one rate. Tile 1,
+     * at 4 Mbaud, hears rubbish from it until its link times out; then both
+     * are at 1 Mbaud. */
+    was = slot_crc(&s.tile[0].n, FW_SLOT_A);
+    crc = make_program(KIND_TILE, FW_SLOT_B, V_NEW + 1, SIM_ACT_OLD, 3032);
+    CHECK(send_program(id_of(0)));
+    SAY_OK("reboot %s", id_of(0));
+    sim_run(&s, 4000);
+    check_settled();
+    CHECK_EQ(s.tile[0].n.slot, FW_SLOT_B);
+    CHECK(cable_at(ecab[0][0], RATE_BASE));
+    CHECK(cable_at(ecab[1][0], RATE_4M));
+    CHECK(cable_at(hubcab, RATE_4M));
+    CHECK_EQ(cable_link(ecab[0][0], 1)->rate_fails, 0);     /* a link that had worked: not a try that failed */
+    SAY_OK("fw %s confirm", id_of(0));
+    SAY_OK("fw %s", id_of(0));
+    CHECK(has_linef("tile %d: runs b good %04x %08x, other none %08x", hix(0), V_NEW + 1, (unsigned)crc,
+                    (unsigned)was));
+    SAY_OK("grid");
+    CHECK_EQ(lines_with("slow:"), 1);
+    CHECK(has_linef("slow: tile %d port W to tile %d port E, 1 Mbaud: tile %d offers no more", hix(1), hix(0),
+                    hix(0)));
+    SAY_OK("tiles");
+    CHECK(line_has(tiles_head(0), " fw 0103"));
+    midi_clear();
+    tap_clear();
+    play(1200, 6);
+    for (int i = 0; i < 3; i++)
+        CHECK_EQ(tap.up[i][UP(FT_NOTE)], 6);
+    CHECK_EQ(H()->stats.notes_lost, 0);
+}
+
+/* A keyboard whose hub and tiles all run the program from before the two
+ * rates takes the new programs through the hub, as tools/update.py sends
+ * them, and is at 4 Mbaud after the restart. Then it takes old ones again. */
+static void old_keyboard_takes_the_new_programs(void)
+{
+    start(304);
+    grid(2, 2, 0x09);
+    for (int i = SIM_HUB; i < 4; i++)
+        sim_factory(&s, i, SIM_ACT_OLD);
+    sim_run(&s, 3500);
+    check_settled();
+    CHECK_EQ(cables_at(RATE_BASE), 5);
+    CHECK_EQ(bad_frames(), 0);
+    SAY_OK("tiles");
+    CHECK_EQ(lines_with("tile"), 0);
+    for (int i = 0; i < 4; i++) {
+        CHECK(line_has(tiles_head(i), " fw 0001"));
+        CHECK(!HT(i)->have_rates);
+    }
+    SAY_OK("grid");
+    CHECK_EQ(lines_with("slow:"), 0);       /* nobody here knows of a faster rate */
+
+    for (int round = 0; round < 2; round++) {
+        uint8_t to = round ? FW_SLOT_A : FW_SLOT_B;
+        uint8_t act = round ? SIM_ACT_OLD : SIM_ACT_RUN;
+        uint8_t rate = round ? RATE_BASE : RATE_4M;
+        uint16_t version = (uint16_t)(V_NEW + round);
+
+        midi_clear();
+        tap_clear();
+        for (int i = 0; i < 4; i++) {
+            make_program(KIND_TILE, to, version, act, 3040u + 10u * (unsigned)round + (unsigned)i);
+            CHECK(send_program(id_of(i)));
+        }
+        make_program(KIND_HUB, to, version, act, 3049u + 10u * (unsigned)round);
+        CHECK(send_program("hub"));
+        CHECK_EQ(H()->stats.silent, 0);
+        SAY_OK("reboot all");
+        SAY_OK("reboot hub");
+        sim_run(&s, 4000);
+        check_settled();
+        CHECK_EQ(cables_at(rate), 5);
+        for (int i = SIM_HUB; i < 4; i++) {
+            const sim_node_t *n = i == SIM_HUB ? &s.hub.n : &s.tile[i].n;
+            CHECK_EQ(n->slot, to);
+            CHECK(n->trial);
+            CHECK_EQ(n->rx_overruns, 0);
+        }
+        SAY_OK("fw all confirm");
+        SAY_OK("fw hub confirm");
+        SAY_OK("fw all");
+        CHECK_EQ(lines_with("tile "), 4);
+        for (int i = 0; i < 4; i++) {
+            char head[48];
+
+            snprintf(head, sizeof head, "tile %d: runs %c good %04x ", hix(i), round ? 'a' : 'b', version);
+            CHECK_EQ(lines_with(head), 1);
+        }
+        for (int c = 0; c < s.ncables; c++) {
+            CHECK_EQ(cable_link(c, 0)->rate_fails, 0);
+            CHECK_EQ(cable_link(c, 1)->rate_fails, 0);
+        }
+        play(1200, 9);
+        for (int i = 0; i < 4; i++)
+            CHECK_EQ(tap.up[i][UP(FT_NOTE)], 6);
+        CHECK_EQ(H()->stats.notes_lost, 0);
+        CHECK_EQ(midi_sounding(), 0);
+        if (round == 0) {
+            SAY_OK("grid");
+            CHECK_EQ(lines_with("slow:"), 0);
+        }
+    }
+}
+
+/* A cable that carries 1 Mbaud and not 4, in one direction or both. Its
+ * ends try RATE_TRIES times, RATE_RETRY_MS apart, and then stay at 1 Mbaud.
+ * The link is never down for it, nobody loses the hub and no note is lost;
+ * what goes through that cable waits while a try lasts. */
+static void cable_too_bad_for_4_mbaud(void)
+{
+    static const struct { int which; bool dead[2]; } cases[] = {
+        { 0, { true, false } },     /* tile 1 to tile 2: what tile 1 says */
+        { 0, { false, true } },     /* ... what tile 2 says */
+        { 1, { true, true } },      /* the hub's cable, both ways */
+        { 2, { true, true } },      /* tile 0 to tile 1 */
+    };
+
+    for (unsigned k = 0; k < sizeof cases / sizeof cases[0]; k++) {
+        start(310 + k);
+        grid(3, 1, k);
+        int c = cases[k].which == 0 ? ecab[1][0] : cases[k].which == 1 ? hubcab : ecab[0][0];
+        s.cable[c].fast_dead[0] = cases[k].dead[0];
+        s.cable[c].fast_dead[1] = cases[k].dead[1];
+        sim_run(&s, 1500);
+        check_settled();
+
+        /* the first try is over, the second not yet due */
+        CHECK(cable_at(c, RATE_BASE));
+        CHECK_EQ(cables_at(RATE_4M), 2);
+        CHECK_EQ(cable_link(c, 0)->rate_fails, 1);
+        CHECK_EQ(cable_link(c, 1)->rate_fails, 1);
+        CHECK_EQ(link_slow(cable_link(c, 0)), SLOW_RETRY);
+        sim_run(&s, 100);       /* ... and an INFO that says so, if it was just then */
+        SAY_OK("grid");
+        CHECK_EQ(lines_with("slow:"), 1);
+        CHECK(strstr(s.text, ", 1 Mbaud: a try at more failed, the next is to come\r\n") != NULL);
+
+        uint8_t epoch[3];
+        unsigned downs = 0, held_most = 0, held = 0;
+        for (int i = 0; i < 3; i++)
+            epoch[i] = T(i)->node.epoch;
+        midi_clear();
+        tap_clear();
+        for (uint32_t t = 0; t < 8000; t++) {
+            for (int i = 0; i < 3; i++) {
+                uint32_t at = (t + 400u - 40u * (uint32_t)i) % 400u;
+                if (at == 0)
+                    press(i, 4, 10);
+                else if (at == 120)
+                    lift(i, 4, 10);
+            }
+            sim_run(&s, 1);
+            for (int e = 0; e < 2; e++)
+                downs += !cable_link(c, e)->up;
+            held = link_holds(cable_link(c, 0)) || link_holds(cable_link(c, 1)) ? held + 1 : 0;
+            if (held > held_most)
+                held_most = held;
+        }
+        sim_run(&s, 1500);
+
+        check_settled();
+        CHECK_EQ(downs, 0);
+        CHECK(held_most > RATE_TRY_MS - 10 && held_most < RATE_TRY_MS + 20);
+        for (int i = 0; i < 3; i++) {
+            CHECK_EQ(T(i)->node.epoch, epoch[i]);       /* nobody lost the hub */
+            CHECK_EQ(tap.up[i][UP(FT_NOTE)], 40);       /* 20 times down and up */
+            CHECK_EQ(T(i)->node.queue_drops, 0);
+        }
+        CHECK_EQ(H()->stats.silent, 0);
+        CHECK_EQ(H()->stats.notes_lost, 0);
+        CHECK_EQ(H()->stats.healed_on + H()->stats.healed_off, 0);
+        CHECK_EQ(midi_sounding(), 0);
+        CHECK_EQ(tap.dups, 0);
+
+        CHECK(cable_at(c, RATE_BASE));
+        CHECK_EQ(cables_at(RATE_4M), 2);
+        for (int e = 0; e < 2; e++) {
+            CHECK_EQ(cable_link(c, e)->rate_fails, RATE_TRIES);
+            CHECK_EQ(link_slow(cable_link(c, e)), SLOW_GAVE_UP);
+        }
+        SAY_OK("grid");
+        CHECK_EQ(lines_with("slow:"), 1);
+        if (c == hubcab) {
+            CHECK(has_linef("slow: the hub to tile %d port E, 1 Mbaud: %d tries at more failed", hix(2),
+                            RATE_TRIES));
+        } else {
+            int w = c == ecab[1][0] ? 1 : 0;        /* the cable's western tile */
+            int say = T(w)->node.id < T(w + 1)->node.id ? w : w + 1;
+
+            CHECK(has_linef("slow: tile %d port %c to tile %d port %c, 1 Mbaud: %d tries at more failed",
+                            hix(say), say == w ? 'E' : 'W', hix(say == w ? w + 1 : w), say == w ? 'W' : 'E',
+                            RATE_TRIES));
+        }
+        SAY_OK("stats");
+        if (c == hubcab)
+            CHECK_EQ(lines_with("cable: "), 1);
+        CHECK(c != hubcab || strstr(s.text, ", 1 Mbaud: 4 tries at more failed\r\n") != NULL);
+
+        /* No try after the last. */
+        sim_run(&s, 3 * RATE_RETRY_MS);
+        CHECK_EQ(cable_link(c, 0)->rate_fails, RATE_TRIES);
+        CHECK(cable_at(c, RATE_BASE));
+
+        /* Another tile on that port is another matter. (Here: the same one
+         * after its cable was out long enough to be forgotten is not.) */
+        if (c != hubcab) {
+            sim_unplug(&s, c);
+            sim_run(&s, 1000);
+            s.cable[c].fast_dead[0] = s.cable[c].fast_dead[1] = false;
+            sim_plug(&s, c);
+            sim_run(&s, 3500);
+            check_settled();
+            CHECK(cable_at(c, RATE_BASE));      /* the same neighbour: still none */
+        }
+    }
+}
+
+/* One cable of a row of three that is otherwise held at 1 Mbaud, and what
+ * is seen on it while the tiles are played, step by step. */
+static struct {
+    int c;
+    uint32_t steps;
+    unsigned presses;               /* each tile's, so far */
+    unsigned downs;                 /* steps with an end of the cable down */
+    unsigned held, held_most;       /* steps in a row with an end holding its frames back */
+    uint8_t epoch[3];
+} one;
+
+static void one_cable_start(uint32_t seed)
+{
+    start(seed);
+    grid(3, 1, seed & 7u);
+    slow_cables();
+    sim_run(&s, 1500);
+    check_settled();
+    CHECK_EQ(cables_at(RATE_BASE), 3);
+
+    memset(&one, 0, sizeof one);
+    one.c = ecab[0][0];
+    for (int i = 0; i < 3; i++)
+        one.epoch[i] = T(i)->node.epoch;
+    midi_clear();
+    tap_clear();
+    for (int e = 0; e < 2; e++)
+        cable_link(one.c, e)->rate_max = RATE_4M;
+}
+
+/* One step. Every tile's key 4 goes down for 120 ms in every 400. */
+static void one_cable_step(void)
+{
+    if (one.steps % SIM_STEPS_PER_MS == 0) {
+        uint32_t ms = one.steps / SIM_STEPS_PER_MS;
+
+        for (int i = 0; i < 3; i++) {
+            uint32_t at = (ms + 400u - 40u * (uint32_t)i) % 400u;
+            if (at == 0)
+                press(i, 4, 10);
+            else if (at == 120)
+                lift(i, 4, 10);
+        }
+        one.presses += ms % 400u == 0;
+    }
+    sim_step(&s);
+    one.steps++;
+    one.downs += !cable_link(one.c, 0)->up || !cable_link(one.c, 1)->up;
+    one.held = link_holds(cable_link(one.c, 0)) || link_holds(cable_link(one.c, 1)) ? one.held + 1 : 0;
+    if (one.held > one.held_most)
+        one.held_most = one.held;
+}
+
+static void one_cable_ms(uint32_t ms)
+{
+    for (uint32_t i = 0; i < ms * SIM_STEPS_PER_MS; i++)
+        one_cable_step();
+}
+
+/* Not a note was lost, and nobody lost the hub. To be called a multiple of
+ * 400 ms after the start. */
+static void one_cable_check(void)
+{
+    sim_run(&s, 600);
+    one.steps += 600 * SIM_STEPS_PER_MS;
+    check_settled();
+    CHECK_EQ(one.downs, 0);
+    for (int i = 0; i < 3; i++) {
+        CHECK_EQ(T(i)->node.epoch, one.epoch[i]);
+        CHECK_EQ(tap.up[i][UP(FT_NOTE)], 2 * one.presses);
+        CHECK_EQ(T(i)->node.queue_drops, 0);
+    }
+    CHECK_EQ(H()->stats.silent, 0);
+    CHECK_EQ(H()->stats.notes_lost, 0);
+    CHECK_EQ(H()->stats.healed_on + H()->stats.healed_off, 0);
+    CHECK_EQ(midi_sounding(), 0);
+    CHECK_EQ(tap.dups, 0);
+}
+
+/* The asking is lost on the way, or the GO that answers it. The asker
+ * holds its frames back until it knows where the other end is, which after
+ * a lost GO is when that end comes back from the faster rate. The cable
+ * stays up and loses nothing, and the next asking takes it to 4 Mbaud. */
+static void rate_change_loses_a_hello(void)
+{
+    for (int what = 0; what < 2; what++) {      /* the asking; the GO */
+        one_cable_start(330 + (uint32_t)what);
+        int c = one.c, end = -1;
+
+        /* until that very HELLO is the next to leave */
+        while (one.steps < 500 * SIM_STEPS_PER_MS && end < 0) {
+            one_cable_step();
+            for (int e = 0; e < 2; e++) {
+                if (what == 0 ? cable_link(c, e)->ask_due : cable_link(c, e)->go_due)
+                    end = e;
+            }
+        }
+        CHECK(end >= 0);
+        if (end < 0)
+            continue;
+        CHECK_EQ(cable_link(c, end)->lead, what == 0);
+        sim_drop(&s, c, end, FT_HELLO, 1);
+        int asker = what == 0 ? end : !end;
+        unsigned bad = bad_frames();
+
+        one_cable_ms(400);
+        CHECK_EQ(s.cable[c].lost[end], 1);
+        CHECK(cable_at(c, RATE_BASE));
+        unsigned held_ms = one.held_most / SIM_STEPS_PER_MS;
+        if (what == 0) {
+            /* "where are you?" "here": no longer than a GO may take, and a little */
+            CHECK(held_ms >= RATE_HOLD_MS && held_ms <= RATE_HOLD_MS + 2 * RATE_CALL_MS + 2);
+            CHECK_EQ(bad_frames(), bad);
+        } else {
+            CHECK(held_ms > RATE_TRY_MS - 10 && held_ms < RATE_TRY_MS + 20);
+        }
+        CHECK_EQ(cable_link(c, asker)->rate_fails, 0);      /* it never left the base rate */
+        CHECK_EQ(cable_link(c, !asker)->rate_fails, what);
+        CHECK_EQ(link_slow(cable_link(c, asker)), SLOW_NOT);
+        CHECK_EQ(link_slow(cable_link(c, !asker)), what ? SLOW_RETRY : SLOW_NOT);
+
+        while (one.steps % (400 * SIM_STEPS_PER_MS) != 0 || !cable_at(c, RATE_4M)) {
+            one_cable_step();
+            if (one.steps > 4000 * SIM_STEPS_PER_MS)
+                break;
+        }
+        CHECK(cable_at(c, RATE_4M));
+        CHECK(one.steps <= (500 + RATE_RETRY_MS + RATE_TRY_MS + 400) * SIM_STEPS_PER_MS);
+        one_cable_check();
+        CHECK_EQ(cables_at(RATE_BASE), 2);
+        sim_run(&s, RATE_PROVEN_MS);
+        CHECK_EQ(cable_link(c, 0)->rate_fails + cable_link(c, 1)->rate_fails, 0);
+    }
+}
+
+/* The tile that is asked writes its flash just then, and reads the asking
+ * 40 ms late. It answers with no GO (the asker might have stopped waiting
+ * for one), but says where it is; nothing is lost, no try is counted as
+ * failed, and the next asking takes the cable to 4 Mbaud. */
+static void rate_asked_of_a_busy_tile(void)
+{
+    one_cable_start(340);
+    int c = one.c, asker = -1;
+
+    while (one.steps < 500 * SIM_STEPS_PER_MS && asker < 0) {
+        one_cable_step();
+        for (int e = 0; e < 2; e++) {
+            if (cable_link(c, e)->ask_due)
+                asker = e;
+        }
+    }
+    CHECK(asker >= 0);
+    if (asker < 0)
+        return;
+    sim_node_t *asked = &s.tile[s.cable[c].node[!asker]].n;
+    asked->busy_until = s.t + 40 * SIM_STEPS_PER_MS;
+    unsigned bad = bad_frames();
+
+    one_cable_ms(30);
+    CHECK_EQ(cable_link(c, asker)->rate_state, RS_BACK);    /* "where are you?" */
+    CHECK_EQ(cable_link(c, !asker)->rate_state, RS_BASE);
+    one_cable_ms(15);
+    CHECK(cable_at(c, RATE_BASE));                          /* "here" */
+    one_cable_ms(355);
+    CHECK(cable_at(c, RATE_BASE));
+    unsigned held_ms = one.held_most / SIM_STEPS_PER_MS;
+    CHECK(held_ms >= 35 && held_ms <= 45);
+    CHECK_EQ(bad_frames(), bad);
+    for (int e = 0; e < 2; e++) {
+        CHECK_EQ(cable_link(c, e)->rate_fails, 0);
+        CHECK_EQ(link_slow(cable_link(c, e)), SLOW_NOT);
+    }
+
+    while (one.steps % (400 * SIM_STEPS_PER_MS) != 0 || !cable_at(c, RATE_4M)) {
+        one_cable_step();
+        if (one.steps > 4000 * SIM_STEPS_PER_MS)
+            break;
+    }
+    CHECK(cable_at(c, RATE_4M));
+    CHECK(one.steps <= (500 + RATE_RETRY_MS + 400 + 400) * SIM_STEPS_PER_MS);
+    CHECK_EQ(bad_frames(), bad);
+    one_cable_check();
+}
+
+/* A tile into its ROM and the hub's bridge over a keyboard at 4 Mbaud:
+ * everybody starts again at 1 Mbaud when the quiet is over, and the cables
+ * are at 4 Mbaud again soon after. */
+static void rates_around_a_bridge(void)
+{
+    start(350);
+    grid(3, 1, 0x05);
+    sim_run(&s, 2500);
+    check_settled();
+    CHECK_EQ(cables_at(RATE_4M), 3);
+    uint32_t id = T(0)->node.id;
+
+    SAY_OK("bootloader %08x 2000", (unsigned)id);
+    sim_run(&s, 60);
+    SAY_OK("bridge 115200");
+    CHECK(H()->bridging);
+    sim_run(&s, 1700);
+    CHECK(s.tile[0].n.halted);
+
+    /* the quiet runs out: tiles 1 and 2 find each other again, the hub says nothing */
+    sim_run(&s, 1500);
+    CHECK(cable_at(ecab[1][0], RATE_4M));
+    CHECK(!cable_link(hubcab, 1)->up);
+    CHECK_EQ(cable_link(hubcab, 1)->rate, RATE_BASE);
+
+    hub_bridge_end(H(), sim_now(&s, SIM_HUB));
+    CHECK_EQ(hub_rate(H()), RATE_BASE);
+    uint32_t ms = 0;
+    while (ms < 2000 && !cable_at(hubcab, RATE_4M)) {
+        sim_run(&s, 1);
+        ms++;
+    }
+    CHECK(ms < 1200);       /* a dwell or two, HELLOs both ways, the change */
+    sim_run(&s, 3000);
+    check_settled();
+    CHECK(HT(0) == NULL);
+    CHECK_EQ(cables_at(RATE_4M), 2);
+
+    sim_power(&s, 0, false);
+    sim_power(&s, 0, true);
+    sim_run(&s, 2500);
+    check_settled();
+    CHECK_EQ(cables_at(RATE_4M), 3);
+    for (int c = 0; c < s.ncables; c++) {
+        CHECK_EQ(cable_link(c, 0)->rate_fails, 0);
+        CHECK_EQ(cable_link(c, 1)->rate_fails, 0);
+    }
+}
+
 int main(void)
 {
     RUN(one_tile_crossed_cable);
@@ -2404,5 +3112,13 @@ int main(void)
     RUN(firmware_power_cut);
     RUN(firmware_refused);
     RUN(power_through_the_hub);
+    RUN(every_cable_at_4_mbaud);
+    RUN(fast_cables_carry_the_streams);
+    RUN(old_tile_between_new_ones);
+    RUN(old_keyboard_takes_the_new_programs);
+    RUN(cable_too_bad_for_4_mbaud);
+    RUN(rate_change_loses_a_hello);
+    RUN(rate_asked_of_a_busy_tile);
+    RUN(rates_around_a_bridge);
     return T_DONE();
 }

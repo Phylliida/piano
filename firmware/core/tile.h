@@ -83,6 +83,11 @@ static inline bool tile_swapped(const tile_t *t, uint8_t port)
     return node_swapped(&t->node, port);
 }
 
+static inline uint8_t tile_rate(const tile_t *t, uint8_t port)
+{
+    return node_rate(&t->node, port);
+}
+
 /* The TILE_ACT_ bits that came up since the last call. */
 unsigned tile_actions(tile_t *t);
 

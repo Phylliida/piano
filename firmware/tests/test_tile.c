@@ -263,6 +263,8 @@ static void info(void)
         CHECK_EQ(get16(s->pl + 31), 1);                     /* seconds since start */
         CHECK_EQ(get16(s->pl + 33), 0);
         CHECK_EQ(get16(s->pl + 35), 0);
+        CHECK_EQ(s->pl[37], 0);                             /* every port at 1 Mbaud */
+        CHECK_EQ(s->pl[38], SLOW_NBR << (2 * PORT_E));      /* this hub offers no more */
     }
 
     /* then once a second */

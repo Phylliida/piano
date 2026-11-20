@@ -1,5 +1,6 @@
 /* One serial port of a tile or the hub: a UART whose two pins can change
- * places (DESIGN.md, "Finding the orientation").
+ * places (DESIGN.md, "Which way round the cable is") and whose speed can
+ * change (DESIGN.md, "How fast").
  *
  * Received bytes are put into a ring by DMA, with no interrupt and no
  * program step in between, so nothing is lost while the program is busy
@@ -11,8 +12,9 @@
 
 /* The longest the program does not look is the start of a firmware update:
  * two flash sectors erased one after the other, 36 ms. A cable carrying
- * bytes back to back at 1 Mbaud brings 3600 bytes in that time. */
-#define UART_RX_LEN  8192
+ * bytes back to back at 4 Mbaud brings 14 400 bytes in that time. (A tile
+ * has four of these rings: 64 KB of its 102 KB.) */
+#define UART_RX_LEN  16384
 #define UART_TX_LEN  128        /* one frame; the bridge sends at most this at a time */
 
 /* Which UART, which pins, which DMA channels. */
@@ -34,11 +36,13 @@ typedef struct {
     uint16_t rx_at;             /* the next byte of the ring to hand out */
     bool tx_busy;
     bool swapped;
+    uint32_t baud;              /* what the UART is set to */
     uint8_t rx[UART_RX_LEN];
     uint8_t tx[UART_TX_LEN];
 } uart_t;
 
-/* 1 Mbaud, 8N1, pins not swapped, pull-ups on both pins. */
+/* The cables' base rate (1 Mbaud), 8N1, pins not swapped, pull-ups on both
+ * pins. */
 void uart_init(uart_t *u, const uart_hw_t *hw);
 
 /* Change speed, parity ('n', 'e' or 'o') and pins: for the hub's bridge.
@@ -47,6 +51,11 @@ void uart_setup(uart_t *u, uint32_t baud, char parity, bool swapped);
 
 /* Let the two pins change places. Call only while uart_tx_idle(). */
 void uart_swap(uart_t *u, bool swapped);
+
+/* Change the speed and nothing else. Call only while uart_tx_idle(). What
+ * was received and not read stays: it came at the old speed, and is as
+ * good as it was. */
+void uart_rate(uart_t *u, uint32_t baud);
 
 /* Up to `max` received bytes; returns how many. */
 size_t uart_read(uart_t *u, uint8_t *buf, size_t max);

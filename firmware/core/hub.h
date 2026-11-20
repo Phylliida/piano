@@ -59,6 +59,8 @@ typedef struct {
     uint32_t nbr_id[TILE_PORTS];
     uint8_t nbr_port[TILE_PORTS];
     uint16_t uptime, crc_drops, queue_drops;
+    bool have_rates;            /* false: a program from before the two rates, all at RATE_1M */
+    uint8_t rates, slow;        /* two bits a port: RATE_*, SLOW_* */
 
     /* where it is */
     bool placed;
@@ -212,6 +214,11 @@ static inline size_t hub_tx(hub_t *h, uint8_t *wire)
 static inline bool hub_swapped(const hub_t *h)
 {
     return node_swapped(&h->node, 0);
+}
+
+static inline uint8_t hub_rate(const hub_t *h)
+{
+    return node_rate(&h->node, 0);
 }
 
 /* The next MIDI message (status, two data bytes). False: none. */

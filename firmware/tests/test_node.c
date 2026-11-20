@@ -45,6 +45,17 @@ static void hello(node_t *n, uint8_t port, uint32_t id, uint8_t their_port, uint
     inject(n, port, FT_HELLO, pl, HELLO_LEN, now);
 }
 
+/* A HELLO that says something about rates: its last byte. */
+static void hello_rate(node_t *n, uint8_t port, uint32_t id, uint8_t their_port, uint8_t flags,
+                       uint32_t now)
+{
+    uint8_t pl[HELLO_LEN];
+
+    link_hello_payload(pl, KIND_TILE, id, their_port);
+    pl[7] = flags;
+    inject(n, port, FT_HELLO, pl, HELLO_LEN, now);
+}
+
 static void beacon(node_t *n, uint8_t port, uint32_t hub, uint16_t seq, uint8_t hops, uint32_t now)
 {
     uint8_t pl[BEACON_LEN];
@@ -823,6 +834,132 @@ static void own_hello_is_nobody(void)
     CHECK(n.port[PORT_W].link.up);              /* the cable works; there is just nobody on it */
 }
 
+/* While a port changes its rate, nothing but HELLOs leaves it: first as
+ * the end that asks, then as the end that is asked. */
+static void rate_change_holds_the_queue(void)
+{
+    node_t n;
+    uint8_t type, len, pl[FRAME_MAX_PAYLOAD], rates[2];
+    const uint8_t at4 = RATE_4M << 2;
+    const uint32_t east = 0x1000u + PORT_E, west = 0x1000u + PORT_W;
+
+    fresh_tile(&n, 0);
+    beacon(&n, PORT_E, HUB, 1, 0, 1);
+    drain(&n);
+    n.changed = false;
+
+    /* The neighbour on E offers 4 Mbaud. Our ID is the lower: we ask. */
+    hello_rate(&n, PORT_E, east, PORT_W, RATE_4M, 2);
+    node_tick(&n, 2);
+    CHECK(next(&n, PORT_E, &type, pl, &len));
+    CHECK_EQ(type, FT_HELLO);
+    CHECK_EQ(len, HELLO_LEN);
+    CHECK_EQ(pl[7], RATE_4M | HELLO_ASK);
+    upstream(&n, PORT_W, FT_NOTE, OTHER, 7, 3);
+    CHECK(!next(&n, PORT_E, &type, pl, &len));  /* the note waits for the GO */
+    CHECK_EQ(node_rate(&n, PORT_E), RATE_1M);
+    CHECK(!n.changed);
+
+    hello_rate(&n, PORT_E, east, PORT_W, RATE_4M | HELLO_GO, 3);
+    CHECK_EQ(node_rate(&n, PORT_E), RATE_4M);
+    CHECK(n.changed);                           /* INFO tells the hub */
+    CHECK(!next(&n, PORT_E, &type, pl, &len));  /* the other end is still on its way there */
+    node_tick(&n, 3 + RATE_GUARD_MS);
+    CHECK(next(&n, PORT_E, &type, pl, &len));
+    CHECK_EQ(type, FT_HELLO);
+    CHECK_EQ(pl[7], at4 | RATE_4M | HELLO_ASK);
+    CHECK(!next(&n, PORT_E, &type, pl, &len));
+
+    hello_rate(&n, PORT_E, east, PORT_W, at4 | RATE_4M | HELLO_ASK, 6);
+    CHECK(next(&n, PORT_E, &type, pl, &len));
+    CHECK_EQ(type, FT_HELLO);
+    CHECK_EQ(pl[7], at4 | RATE_4M);             /* "I hear you" */
+    CHECK(next(&n, PORT_E, &type, pl, &len));
+    CHECK_EQ(type, FT_NOTE);
+    CHECK_EQ(pl[4], 7);
+    CHECK(!next(&n, PORT_E, &type, pl, &len));
+
+    /* The neighbour on W asks us. */
+    n.changed = false;
+    cmd(&n, PORT_E, OTHER, 1, 7);               /* something for W: it has the beacon */
+    node_tick(&n, 7);                           /* a program that runs, not one that stood still */
+    hello_rate(&n, PORT_W, west, PORT_E, RATE_4M | HELLO_ASK, 7);
+    CHECK(next(&n, PORT_W, &type, pl, &len));
+    CHECK_EQ(type, FT_HELLO);
+    CHECK_EQ(pl[7], RATE_4M | HELLO_GO);        /* said at the old rate, */
+    CHECK_EQ(node_rate(&n, PORT_W), RATE_4M);   /* and the new one is next */
+    CHECK(n.changed);
+    for (uint32_t t = 8; t < 30; t++) {         /* not a word until it calls */
+        beacon(&n, PORT_E, HUB, (uint16_t)t, 0, t);
+        node_tick(&n, t);
+        CHECK(!next(&n, PORT_W, &type, pl, &len));
+    }
+    hello_rate(&n, PORT_W, west, PORT_E, at4 | RATE_4M | HELLO_ASK, 30);
+    CHECK(next(&n, PORT_W, &type, pl, &len));
+    CHECK_EQ(type, FT_HELLO);
+    CHECK_EQ(pl[7], at4 | RATE_4M | HELLO_ASK);
+    CHECK(!next(&n, PORT_W, &type, pl, &len));
+    hello_rate(&n, PORT_W, west, PORT_E, at4 | RATE_4M, 31);
+    CHECK(next_data(&n, PORT_W, &type, pl, &len));
+    CHECK_EQ(type, FT_BEACON);
+    CHECK(next_data(&n, PORT_W, &type, pl, &len));
+    CHECK_EQ(type, FT_CMD);
+
+    node_rates(&n, rates);
+    CHECK_EQ(rates[0], (RATE_4M << (2 * PORT_E)) | (RATE_4M << (2 * PORT_W)));
+    /* N and S: neighbours that offer no more */
+    CHECK_EQ(rates[1], (SLOW_NBR << (2 * PORT_N)) | (SLOW_NBR << (2 * PORT_S)));
+}
+
+/* A try that fails: the frames held back go out at the old rate. */
+static void rate_change_that_fails(void)
+{
+    node_t n;
+    uint8_t type, len, pl[FRAME_MAX_PAYLOAD], rates[2];
+    const uint32_t east = 0x1000u + PORT_E;
+    uint32_t t = 2;
+
+    fresh_tile(&n, 0);
+    beacon(&n, PORT_E, HUB, 1, 0, 1);
+    drain(&n);
+    hello_rate(&n, PORT_E, east, PORT_W, RATE_4M, t);
+    node_tick(&n, t);
+    CHECK(next(&n, PORT_E, &type, pl, &len));
+    hello_rate(&n, PORT_E, east, PORT_W, RATE_4M | HELLO_GO, t);
+    upstream(&n, PORT_W, FT_NOTE, OTHER, 9, t);
+    n.changed = false;
+
+    /* calls, and nobody answers */
+    int calls = 0;
+    for (t++; t < 1000; t++) {
+        node_tick(&n, t);
+        if (node_rate(&n, PORT_E) != RATE_4M)
+            break;
+        while (next(&n, PORT_E, &type, pl, &len)) {
+            CHECK_EQ(type, FT_HELLO);
+            calls++;
+        }
+    }
+    CHECK_NEAR(t, 2 + RATE_TRY_MS, 2);
+    CHECK_NEAR(calls, RATE_TRY_MS / RATE_CALL_MS, 2);
+    CHECK(n.changed);
+    CHECK(n.port[PORT_E].link.up);
+    CHECK(next(&n, PORT_E, &type, pl, &len));               /* at once, at the old rate */
+    CHECK_EQ(type, FT_HELLO);
+    CHECK_EQ(pl[7], RATE_4M | HELLO_BACK);
+    CHECK(!next(&n, PORT_E, &type, pl, &len));              /* the other end may not be back yet */
+    hello_rate(&n, PORT_E, east, PORT_W, RATE_4M | HELLO_BACK, t);
+    CHECK(next(&n, PORT_E, &type, pl, &len));
+    CHECK_EQ(type, FT_HELLO);
+    CHECK_EQ(pl[7], RATE_4M);
+    CHECK(next(&n, PORT_E, &type, pl, &len));
+    CHECK_EQ(type, FT_NOTE);
+    CHECK_EQ(pl[4], 9);
+    node_rates(&n, rates);
+    CHECK_EQ(rates[0], 0);
+    CHECK_EQ((rates[1] >> (2 * PORT_E)) & 3, SLOW_RETRY);
+}
+
 int main(void)
 {
     RUN(hub_sends_beacons);
@@ -844,5 +981,7 @@ int main(void)
     RUN(bad_frames_are_counted);
     RUN(hub_listens_to_tiles_only);
     RUN(own_hello_is_nobody);
+    RUN(rate_change_holds_the_queue);
+    RUN(rate_change_that_fails);
     return T_DONE();
 }

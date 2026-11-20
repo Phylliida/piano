@@ -276,7 +276,7 @@ static void on_state(hub_t *h, hub_tile_t *t, const uint8_t *b)
     }
 }
 
-static void on_info(hub_t *h, hub_tile_t *t, const uint8_t *b)
+static void on_info(hub_t *h, hub_tile_t *t, const uint8_t *b, uint8_t n)
 {
     bool moved = !t->have_info || t->cols != b[3] || t->rows != b[4];
 
@@ -298,6 +298,9 @@ static void on_info(hub_t *h, hub_tile_t *t, const uint8_t *b)
     t->uptime = get16(b + 27);
     t->crc_drops = get16(b + 29);
     t->queue_drops = get16(b + 31);
+    t->have_rates = n >= INFO_LEN - UP_HEAD_LEN;
+    t->rates = t->have_rates ? b[33] : 0;
+    t->slow = t->have_rates ? b[34] : 0;
     if (moved)
         h->grid_dirty = true;
 }
@@ -380,8 +383,8 @@ static void on_frame(void *ctx, uint8_t port, uint8_t type, const uint8_t *pl, u
             on_state(h, t, b);
         break;
     case FT_INFO:
-        if (n >= INFO_LEN - UP_HEAD_LEN)
-            on_info(h, t, b);
+        if (n >= INFO_MIN_LEN - UP_HEAD_LEN)
+            on_info(h, t, b, n);
         break;
     case FT_POS:
         on_pos(h, t, b, n);

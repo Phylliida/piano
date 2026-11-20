@@ -14,6 +14,9 @@
  * Before the first `s`, in this order:
  *   n <count>    so many tiles (one if not said). The answer: ok and their IDs
  *   w <W|N|E|S>  tile 0's port that the hub's cable is in (W if not said)
+ *   o            the hub and every tile come with the program from before
+ *                the cables had two rates (sim.h: SIM_ACT_OLD), which calls
+ *                itself version 0001, and not with the one this PC builds
  *   k <tile> <port> <tile> <port>
  *                a cable between two tiles. The hub's cable is cable 0, these
  *                are 1, 2, ... in the order they come
@@ -379,6 +382,15 @@ int main(void)
             putchar('\n');
             break;
         }
+        case 'o':
+            if (cabled)
+                fail("o: before the first k or s");
+            for (int i = SIM_HUB; i < s.ntiles; i++)
+                sim_factory(&s, i, SIM_ACT_OLD);
+            hub_was_up = hub_up();      /* it starts once more, and that is its first start */
+            hub_starts = hub_was_up;
+            puts("ok");
+            break;
         case 'w':
             if (cabled)
                 fail("w: before the first k or s");

@@ -183,7 +183,11 @@ static void node_frame(node_t *n, uint8_t port, uint8_t type,
     link_heard(&p->link, now);
 
     if (type == FT_HELLO) {
-        if (link_hello(&p->link, pl, len, n->id) & LINK_NBR)
+        uint8_t rate = p->link.rate;
+
+        if (link_hello(&p->link, pl, len, n->id, now) & LINK_NBR)
+            n->changed = true;
+        if (p->link.rate != rate)
             n->changed = true;
         return;
     }
@@ -227,6 +231,7 @@ void node_rx(node_t *n, uint8_t port, const uint8_t *data, size_t len, uint32_t 
     uint8_t type, plen;
     uint8_t payload[FRAME_MAX_PAYLOAD];
 
+    n->now = now;
     if (n->quiet == QUIET_ON)
         return;
     p->rx_last = now;
@@ -305,6 +310,7 @@ void node_resume(node_t *n, uint32_t now)
 
 void node_tick(node_t *n, uint32_t now)
 {
+    n->now = now;
     if (n->quiet == QUIET_SOON && reached(now, n->quiet_from))
         quiet_begin(n, now);
     if (n->quiet == QUIET_ON) {
@@ -328,10 +334,11 @@ void node_tick(node_t *n, uint32_t now)
         if ((p->rx.len || p->rx.too_long) && since(now, p->rx_last) >= RX_GAP_MS)
             frame_rx_reset(&p->rx);
 
+        uint8_t rate = p->link.rate;
         unsigned ev = link_tick(&p->link, &n->rng, now);
         if (ev & LINK_SWAPPED)
             frame_rx_reset(&p->rx);
-        if (ev & LINK_NBR)
+        if ((ev & LINK_NBR) || p->link.rate != rate)
             n->changed = true;
         if (ev & LINK_WENT_DOWN) {
             p->hops = 0xFF;
@@ -375,10 +382,16 @@ size_t node_tx(node_t *n, uint8_t port, uint8_t *wire)
     /* HELLO keeps the link up and a beacon is only worth its newest copy,
      * so both go before anything queued. */
     if (p->link.hello_due) {
-        p->link.hello_due = false;
-        link_hello_payload(payload, n->kind, n->id, port);
+        uint8_t rate = p->link.rate;
+
+        link_hello_out(&p->link, payload, n->kind, n->id, port, n->now);
+        if (p->link.rate != rate)
+            n->changed = true;
         return frame_encode(FT_HELLO, payload, HELLO_LEN, wire);
     }
+    /* While the port's rate is changing, the rest waits. */
+    if (link_holds(&p->link))
+        return 0;
     if (p->beacon_due) {
         p->beacon_due = false;
         return frame_encode(FT_BEACON, p->beacon, BEACON_LEN, wire);
@@ -413,6 +426,15 @@ bool node_send_down(node_t *n, uint8_t type, const uint8_t *payload, uint8_t len
     return queue_push(n, &n->port[0].queue, type, payload, len);
 }
 
+void node_rates(const node_t *n, uint8_t out[2])
+{
+    out[0] = out[1] = 0;
+    for (uint8_t p = 0; p < n->nports; p++) {
+        out[0] |= (uint8_t)(n->port[p].link.rate << (2 * p));
+        out[1] |= (uint8_t)(link_slow(&n->port[p].link) << (2 * p));
+    }
+}
+
 /* ------------------------------------------------------------------- init --- */
 
 void node_init(node_t *n, uint8_t kind, uint8_t nports, uint32_t id,
@@ -422,6 +444,7 @@ void node_init(node_t *n, uint8_t kind, uint8_t nports, uint32_t id,
     n->kind = kind;
     n->nports = nports;
     n->id = id;
+    n->now = now;
     n->deliver = deliver;
     n->ctx = ctx;
     /* The ID seeds the dwell times, so two tiles do not swap in step. */

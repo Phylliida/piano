@@ -215,6 +215,7 @@ class World:
         self.heard_at = 0
         self.link_since = -1000
         self.info = {"fw": 1, "up": 2}          # the tile's last INFO, or None
+        self.port_rates = True          # `info` says how fast each cable is (since 0002)
 
         # the tile
         self.tile_id = 0x1234ABCD
@@ -452,7 +453,8 @@ class World:
                     self.say("firmware %04x, 8 x 5 keys, not calibrated" % self.info["fw"])
                     self.say("to the hub: port %s, 0 tiles between" % self.hub_port)
                     for p in "WNES":
-                        self.say("%s: %s" % (p, "the hub" if p == self.hub_port else "nobody"))
+                        there = "the hub, 4 Mbaud" if self.port_rates else "the hub"
+                        self.say("%s: %s" % (p, there if p == self.hub_port else "nobody"))
                     self.say("up %d s, 0 bad frames, 0 frames dropped from a full queue"
                              % self.info["up"])
         elif name == "quiet":
@@ -1032,8 +1034,8 @@ class Scenarios:
         self.check_flashed()
         self.assertEqual(self.typed("bootloader"), ["bootloader %s 10000" % self.tile])
         self.assertEqual(self.typed("bridge"), ["bridge 115200 e straight"])
-        self.assertIn("tile %s is on the hub's cable, by its W port; firmware 0001" % self.tile,
-                      self.out)
+        self.assertIn("tile %s is on the hub's cable, by its W port; firmware %s"
+                      % (self.tile, self.world.reported(1)), self.out)
         self.assertIn("chip: AT32F405RCT7 (0x70053240)", self.out)
         self.assertIn("tile %s is back, firmware %s" % (self.tile, self.world.reported(2)),
                       self.out)
@@ -1582,6 +1584,13 @@ class ImitationTest(Scenarios, unittest.TestCase):
         self.assertEqual(self.run_script(), 0, self.out)
         self.check_flashed()
         self.assertIn("which program the tile runs could not be asked: tile 0: no answer",
+                      self.out)
+
+    def test_hub_from_before_the_cable_rates(self):
+        # its `info` says who is on a port, and not how fast the cable is
+        self.world.port_rates = False
+        self.assertEqual(self.run_script("--check"), 0, self.out)
+        self.assertIn("tile %s is on the hub's cable, by its W port; firmware 0001" % self.tile,
                       self.out)
 
     def test_not_the_hub(self):

@@ -269,14 +269,20 @@ int main(void)
                 port_reboot();
         }
 
-        /* A transmitter that is free first turns its pins round, if the
-         * link wants them round, and then takes the next frame. */
+        /* A transmitter that is free first turns its pins round and
+         * changes its speed, if the link wants that, and then takes the
+         * next frame. (A HELLO that says "faster from here on" changes
+         * what the link wants as it is taken: it leaves at the old speed,
+         * and the new one is set when its last bit is out.) */
         for (unsigned p = 0; p < TILE_PORTS; p++) {
             if (!uart_tx_idle(&uart[p]))
                 continue;
             bool swapped = tile_swapped(&tile, (uint8_t)p);
             if (uart[p].swapped != swapped)
                 uart_swap(&uart[p], swapped);
+            uint32_t baud = rate_baud(tile_rate(&tile, (uint8_t)p));
+            if (uart[p].baud != baud)
+                uart_rate(&uart[p], baud);
             size_t n = tile_tx(&tile, (uint8_t)p, wire);
             if (n)
                 uart_write(&uart[p], wire, n);

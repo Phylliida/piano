@@ -127,6 +127,101 @@ static void show_who(hub_t *h, uint32_t id)
         hub_print(h, "%08x", (unsigned)id);
 }
 
+/* What a tile's INFO says of one port's cable: RATE_* and SLOW_*. */
+static uint8_t port_rate(const hub_tile_t *t, uint8_t port)
+{
+    return (t->rates >> (2 * port)) & 3u;
+}
+
+static uint8_t port_slow(const hub_tile_t *t, uint8_t port)
+{
+    return (t->slow >> (2 * port)) & 3u;
+}
+
+/* ", 1 Mbaud: tile 3 offers no more": a cable's rate and, if that is not
+ * the fastest, why, as one end tells it. `other` is the other end. */
+static void show_rate(hub_t *h, uint8_t rate, uint8_t why, uint32_t other)
+{
+    hub_print(h, ", %u Mbaud", (unsigned)(rate_baud(rate) / 1000000u));
+    switch (why) {
+    case SLOW_NBR:
+        hub_print(h, ": ");
+        show_who(h, other);
+        hub_print(h, " offers no more");
+        break;
+    case SLOW_RETRY:
+        hub_print(h, ": a try at more failed, the next is to come");
+        break;
+    case SLOW_GAVE_UP:
+        hub_print(h, ": %d tries at more failed", RATE_TRIES);
+        break;
+    default:
+        break;
+    }
+}
+
+/* The same cable as its other end tells it; SLOW_NOT if that end tells
+ * nothing. */
+static uint8_t far_end_slow(hub_t *h, const hub_tile_t *t, uint8_t port)
+{
+    uint8_t far = t->nbr_port[port];
+    const hub_tile_t *o = hub_find(h, t->nbr_id[port]);
+
+    if (t->nbr_id[port] == h->node.id)
+        return link_slow(&h->node.port[0].link);
+    if (!o || !o->have_info || !o->have_rates || far >= TILE_PORTS || o->nbr_id[far] != t->id)
+        return SLOW_NOT;
+    return port_slow(o, far);
+}
+
+/* `grid`: the cables that are not at their fastest rate, each once. Both
+ * ends know why; the one that knows more says it. */
+static void show_slow_links(hub_t *h)
+{
+    const link_t *l = &h->node.port[0].link;
+    const hub_tile_t *root = hub_find(h, l->nbr_id);
+    uint8_t why = link_slow(l);
+
+    if (why != SLOW_NOT) {
+        uint8_t far = SLOW_NOT;
+
+        if (root && root->have_info && root->have_rates && l->nbr_port < TILE_PORTS &&
+            root->nbr_id[l->nbr_port] == h->node.id)
+            far = port_slow(root, l->nbr_port);
+        if (why >= far) {
+            hub_print(h, "slow: the hub to ");
+            show_who(h, l->nbr_id);
+            hub_print(h, " port %c", port_letter(l->nbr_port));
+            show_rate(h, l->rate, why, l->nbr_id);
+            end_line(h);
+        }
+    }
+
+    for (int i = 0; i < HUB_MAX_TILES; i++) {
+        const hub_tile_t *t = &h->tile[i];
+
+        if (!t->used || !t->have_info || !t->have_rates)
+            continue;
+        for (uint8_t p = 0; p < TILE_PORTS; p++) {
+            uint32_t other = t->nbr_id[p];
+            uint8_t far;
+
+            why = port_slow(t, p);
+            if (other == ID_NONE || why == SLOW_NOT)
+                continue;
+            far = far_end_slow(h, t, p);
+            if (why < far || (why == far && (other == h->node.id || other < t->id)))
+                continue;
+            hub_print(h, "slow: tile %d port %c to ", i, port_letter(p));
+            show_who(h, other);
+            if (other != h->node.id)
+                hub_print(h, " port %c", port_letter(t->nbr_port[p]));
+            show_rate(h, port_rate(t, p), why, other);
+            end_line(h);
+        }
+    }
+}
+
 static void show_flags(hub_t *h, const hub_tile_t *t)
 {
     if (t->flags & INFO_CALIBRATED)
@@ -208,6 +303,11 @@ static const char *cmd_tiles(hub_t *h, char **args)
                 hub_print(h, " hops %u", t->hops);
             hub_print(h, " fw %04x", t->version);
             show_flags(h, t);
+            for (uint8_t p = 0; t->have_rates && p < TILE_PORTS; p++) {
+                if (t->nbr_id[p] != ID_NONE && port_slow(t, p) != SLOW_NOT)
+                    hub_print(h, " %c at %u Mbaud", port_letter(p),
+                              (unsigned)(rate_baud(port_rate(t, p)) / 1000000u));
+            }
         } else {
             hub_print(h, " (no info yet)");
         }
@@ -266,6 +366,7 @@ static const char *cmd_grid(hub_t *h, char **args)
             hub_print(h, ", which the other cables contradict");
         end_line(h);
     }
+    show_slow_links(h);
     return NULL;
 }
 
@@ -307,10 +408,11 @@ static const char *cmd_info(hub_t *h, char **args)
             continue;
         }
         show_who(h, t->nbr_id[p]);
-        if (t->nbr_id[p] == h->node.id)
-            end_line(h);
-        else
-            hub_say(h, " port %c", port_letter(t->nbr_port[p]));
+        if (t->nbr_id[p] != h->node.id)
+            hub_print(h, " port %c", port_letter(t->nbr_port[p]));
+        if (t->have_rates)
+            show_rate(h, port_rate(t, p), port_slow(t, p), t->nbr_id[p]);
+        end_line(h);
     }
     hub_say(h, "up %u s, %u bad frames, %u frames dropped from a full queue", t->uptime,
             t->crc_drops, t->queue_drops);
@@ -965,8 +1067,10 @@ static const char *cmd_stats(hub_t *h, char **args)
     hub_say(h, "commands: %u unanswered", (unsigned)s->no_answer);
     hub_say(h, "usb: %u midi messages and %u characters dropped", (unsigned)s->midi_lost,
             (unsigned)s->out_lost);
-    hub_say(h, "cable: %u bad frames, %u dropped from a full queue", h->node.crc_drops,
-            h->node.queue_drops);
+    hub_print(h, "cable: %u bad frames, %u dropped from a full queue", h->node.crc_drops,
+              h->node.queue_drops);
+    show_rate(h, hub_rate(h), link_slow(&h->node.port[0].link), h->node.port[0].link.nbr_id);
+    end_line(h);
     return NULL;
 }
 

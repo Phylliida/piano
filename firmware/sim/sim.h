@@ -2,13 +2,16 @@
  * with simulated cables, keys, flash and time in place of the hardware.
  *
  * Time moves in steps of 100 us. In one step a transmitter at 1 Mbaud sends
- * 10 bytes, one frame straight after another; a tile scans its keys every
- * 5 steps; every node's program is ticked every 10. Each node has its own
+ * 10 bytes and one at 4 Mbaud 40, one frame straight after another; a tile
+ * scans its keys every 5 steps; every node's program is ticked every 10.
+ * Bytes sent at one rate into a port that listens at another arrive as
+ * rubbish. Each node has its own
  * clock, started at a random value when the node starts, as real ones do:
  * nothing in the protocol may compare one node's time with another's.
  *
  * What the simulator does that the real port code has to do too:
- *   - a port's pins change over (link.swapped) only between two frames;
+ *   - a port's pins change over (link.swapped) and its rate changes
+ *     (link.rate) only between two frames, never with one half sent;
  *   - while flash is written the program stands still for SIM_FLASH_MS, the
  *     frame being sent goes on, and what arrives waits in a buffer;
  *   - REBOOT starts the program again from what is in flash.
@@ -20,7 +23,8 @@
  * is always this PC's tile.c or hub.c; the image in the slot only says how
  * it behaves (SIM_ACT_): a hanging one stands still until the watchdog the
  * bootloader started for a trial restarts the node, a deaf one runs and
- * hears nothing. Erasing and writing the program flash takes time like the
+ * hears nothing, an old one speaks as the program from before the two cable
+ * rates did. Erasing and writing the program flash takes time like the
  * settings do, and power that goes meanwhile leaves the last operation
  * half done.
  *
@@ -48,16 +52,19 @@
 
 #define SIM_STEPS_PER_MS  10    /* a step is 100 us */
 #define SIM_STEP_BYTES    10    /* 1 Mbaud, 10 bits to the byte */
+#define SIM_STEP_TICKS    40    /* a step in bytes at the fastest rate, 4 Mbaud */
 #define SIM_SCAN_STEPS    5
 #define SIM_SCAN_HZ       2000u
 #define SIM_FLASH_MS      40    /* erasing and writing the record; erasing a sector of program */
 #define SIM_WORD_STEPS    1     /* writing four bytes of program: 100 us */
 #define SIM_WDT_MS        4000  /* the watchdog a program on trial runs under */
 #define SIM_FACTORY_LEN   4096  /* the program a node comes with */
+#define SIM_OLD_VERSION   0x0001u   /* ... if that is a SIM_ACT_OLD one: FW_VERSION then */
 #define SIM_BOOT_MS       20    /* from reset to the program's first line */
 #define SIM_FEED_MS       300   /* from the hub's program's first line to power for the
                                  * tiles: the computer has to set its USB up first */
-#define SIM_RX_MAX        1024  /* bytes a port keeps while the program is busy */
+#define SIM_RX_MAX        16384 /* bytes a port keeps while the program is busy: the real
+                                 * port's ring (port/at32f405/uart.h) */
 
 #define SIM_MIDI_MAX      8192
 #define SIM_TEXT_MAX      (1 << 16)
@@ -75,6 +82,8 @@ typedef struct {
     int cable;                  /* -1: nothing plugged in */
     uint8_t end;                /* which end of that cable: 0 or 1 */
     bool swapped;               /* the pins as they are now */
+    uint8_t rate;               /* RATE_*: what its UART is set to now */
+    uint8_t junk;               /* bytes that came in too fast to make one of */
     sim_tx_t tx;
     uint8_t rx[SIM_RX_MAX];     /* arrived, not yet given to the program */
     uint16_t rx_len;
@@ -142,6 +151,7 @@ typedef struct {
     uint16_t corrupt[2];        /* frames in a thousand with one bit turned over */
     uint8_t drop_type[2];       /* the next drop_left frames of this type vanish; 0: any type */
     uint16_t drop_left[2];
+    bool fast_dead[2];          /* what is sent above the base rate arrives as rubbish */
     uint32_t sent[2], arrived[2], lost[2];      /* frames */
 } sim_cable_t;
 
@@ -206,6 +216,11 @@ void sim_drop(sim_t *s, int cable, int end, uint8_t type, unsigned count);
 /* Off: the node stops dead. On: it starts from what is in its flash; a
  * tile that has its power from the hub, once the hub feeds it. */
 void sim_power(sim_t *s, int node, bool on);
+
+/* The node came from the factory with a program that behaves like `act`
+ * (SIM_ACT_): its flash is as it was then, with that program in slot A, and
+ * the node starts again. */
+void sim_factory(sim_t *s, int node, uint8_t act);
 
 void sim_run(sim_t *s, uint32_t ms);
 

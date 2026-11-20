@@ -11,7 +11,10 @@
  *   node_rx()    with the bytes a port received,
  *   node_tick()  about once a millisecond,
  *   node_tx()    whenever a port's transmitter is free, to get the next frame,
- *   node_swapped() to learn which way round a port's pins should be. */
+ *   node_swapped() to learn which way round a port's pins should be,
+ *   node_rate()  to learn how fast its UART should be.
+ * Pins and rate are to be set when the transmitter is free and before
+ * node_tx() is asked: the frame it hands out is meant for them. */
 #ifndef PIANO_NODE_H
 #define PIANO_NODE_H
 
@@ -56,6 +59,7 @@ typedef struct {
     uint8_t kind;               /* KIND_TILE or KIND_HUB */
     uint8_t nports;
     uint32_t id;
+    uint32_t now;               /* the time of the last node_rx() or node_tick(), for node_tx() */
     rng_t rng;
     node_port_t port[NODE_MAX_PORTS];
 
@@ -103,6 +107,15 @@ static inline bool node_swapped(const node_t *n, uint8_t port)
 {
     return n->port[port].link.swapped;
 }
+
+/* RATE_*. A change takes effect behind the frame that left last. */
+static inline uint8_t node_rate(const node_t *n, uint8_t port)
+{
+    return n->port[port].link.rate;
+}
+
+/* INFO's two bytes about the rates. */
+void node_rates(const node_t *n, uint8_t out[2]);
 
 /* Tile: queue one of its own upstream frames. `body` is what follows the
  * ID. False if it was not queued: no parent, or the queue is full of more

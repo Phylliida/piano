@@ -24,6 +24,7 @@ static void line_setup(uart_t *u, uint32_t baud, char parity, bool swapped)
     usart_dma_receiver_enable(usart, TRUE);
     usart_enable(usart, TRUE);
     u->swapped = swapped;
+    u->baud = baud;
 }
 
 /* Where the DMA will put the next received byte. */
@@ -40,6 +41,7 @@ void uart_init(uart_t *u, const uart_hw_t *hw)
     u->rx_at = 0;
     u->tx_busy = false;
     u->swapped = false;
+    u->baud = 0;
 
     crm_periph_clock_enable(hw->clock, TRUE);
 
@@ -76,7 +78,7 @@ void uart_init(uart_t *u, const uart_hw_t *hw)
     dma_init(hw->tx_ch, &d);
     dma_flexible_config(hw->dma, hw->tx_mux, hw->tx_req);
 
-    line_setup(u, 1000000, 'n', false);
+    line_setup(u, rate_baud(RATE_BASE), 'n', false);
 }
 
 void uart_setup(uart_t *u, uint32_t baud, char parity, bool swapped)
@@ -93,6 +95,19 @@ void uart_swap(uart_t *u, bool swapped)
     usart_transmit_receive_pin_swap(usart, swapped ? TRUE : FALSE);
     usart_enable(usart, TRUE);
     u->swapped = swapped;
+}
+
+void uart_rate(uart_t *u, uint32_t baud)
+{
+    usart_type *usart = u->hw->usart;
+
+    /* Off while the divider changes: a byte that is on its way in is lost,
+     * and whoever changes the speed has seen to it that none is. The DMA
+     * and its place in the ring are left alone. */
+    usart_enable(usart, FALSE);
+    usart_init(usart, baud, USART_DATA_8BITS, USART_STOP_1_BIT);
+    usart_enable(usart, TRUE);
+    u->baud = baud;
 }
 
 size_t uart_read(uart_t *u, uint8_t *buf, size_t max)

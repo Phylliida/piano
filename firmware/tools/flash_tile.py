@@ -620,7 +620,7 @@ def find_tile(hub):
         m = re.match(r"firmware ([0-9a-f]{4}),", text)
         if m:
             firmware = m.group(1)
-        m = re.fullmatch(r"([WNES]): the hub", text)
+        m = re.match(r"([WNES]): the hub(?:,|$)", text)     # "E: the hub, 4 Mbaud"; before 0002 no rate
         if m:
             port = m.group(1)
         m = re.match(r"up (\d+) s,", text)

@@ -14,7 +14,8 @@
 #include "uart.h"
 #include "usb.h"
 
-#define CABLE_BAUD  1000000u    /* what uart_init() sets, and what the bridge gives back */
+#define CABLE_BAUD  rate_baud(RATE_BASE)    /* what uart_init() sets, and what the bridge gives
+                                             * back: the link starts afresh at that speed */
 
 PORT_IMAGE_HEADER(KIND_HUB);
 
@@ -292,12 +293,14 @@ static void cable_run(uint32_t now)
     if (n)
         hub_rx(&hub, buf, n, now);
 
-    /* A transmitter that is free first turns its pins round, if the link
-     * wants them round, and then takes the next frame. */
+    /* A transmitter that is free first turns its pins round and changes
+     * its speed, if the link wants that, and then takes the next frame. */
     if (!uart_tx_idle(&cable))
         return;
     if (cable.swapped != hub_swapped(&hub))
         uart_swap(&cable, hub_swapped(&hub));
+    if (cable.baud != rate_baud(hub_rate(&hub)))
+        uart_rate(&cable, rate_baud(hub_rate(&hub)));
     n = hub_tx(&hub, wire);
     if (n)
         uart_write(&cable, wire, n);

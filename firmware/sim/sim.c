@@ -54,6 +54,8 @@ static void ports_clear(sim_t *s, int i)
     for (uint8_t p = 0; p < ports_of(i); p++) {
         sim_port_t *sp = port_of(s, i, p);
         sp->swapped = false;
+        sp->rate = RATE_BASE;
+        sp->junk = 0;
         sp->tx.len = sp->tx.sent = 0;
         sp->rx_len = 0;
     }
@@ -90,14 +92,26 @@ static bool chip_program(void *ctx, uint32_t addr, const uint8_t *data, uint32_t
 }
 
 /* As the node comes from the factory: a program in slot A, the rest erased. */
-static void factory(sim_node_t *n, uint8_t kind)
+static void factory(sim_node_t *n, uint8_t kind, uint8_t act)
 {
     uint8_t image[SIM_FACTORY_LEN];
 
     /* nothing here draws from the simulator's own random numbers */
     flashsim_init(&n->chip, get32(n->uid));
-    flashsim_image(image, sizeof image, kind, FW_SLOT_A, FW_VERSION, SIM_ACT_RUN, get32(n->uid + 4));
+    flashsim_image(image, sizeof image, kind, FW_SLOT_A,
+                   act == SIM_ACT_OLD ? SIM_OLD_VERSION : FW_VERSION, act, get32(n->uid + 4));
     flashsim_put(&n->chip, FW_SLOT_A, image, sizeof image);
+}
+
+/* The program from before the two rates never offers the faster one. */
+static void old_program(sim_t *s, int i)
+{
+    if (i == SIM_HUB) {
+        s->hub.h.node.port[0].link.rate_max = RATE_BASE;
+        return;
+    }
+    for (uint8_t p = 0; p < TILE_PORTS; p++)
+        s->tile[i].t.node.port[p].link.rate_max = RATE_BASE;
 }
 
 /* The node starts: the bootloader picks a program, and that starts from
@@ -149,6 +163,8 @@ static void boot(sim_t *s, int i)
                   n->have_flash ? STORE_TILE_LEN : 0, SIM_SCAN_HZ, local_ms(s, n));
         tile_set_flash(&st->t, &flash, n->slot);
     }
+    if (n->act == SIM_ACT_OLD)
+        old_program(s, i);
 }
 
 static void stop(sim_t *s, int i)
@@ -191,6 +207,17 @@ void sim_power(sim_t *s, int node, bool on)
         n->boot_at = s->t + SIM_BOOT_MS * SIM_STEPS_PER_MS;
 }
 
+void sim_factory(sim_t *s, int node, uint8_t act)
+{
+    sim_node_t *n = node_of(s, node);
+
+    stop(s, node);
+    n->have_flash = false;
+    factory(n, node == SIM_HUB ? KIND_HUB : KIND_TILE, act);
+    if (!n->off && (node == SIM_HUB || !hub_dark(s)))
+        n->boot_at = s->t + SIM_BOOT_MS * SIM_STEPS_PER_MS;
+}
+
 /* With hub_feeds: no tile has power while the hub's switches are off, and
  * every tile that is not switched off starts when they are on. (Without:
  * the switches are never off, and no tile is without power unless it is
@@ -222,7 +249,7 @@ void sim_init(sim_t *s, uint32_t seed)
     s->hub.n.sim = s;
     s->hub.port[0].cable = -1;
     uid_make(s, s->hub.n.uid);
-    factory(&s->hub.n, KIND_HUB);
+    factory(&s->hub.n, KIND_HUB, SIM_ACT_RUN);
     boot(s, SIM_HUB);
 }
 
@@ -238,7 +265,7 @@ int sim_add_tile(sim_t *s)
     for (uint8_t p = 0; p < TILE_PORTS; p++)
         st->port[p].cable = -1;
     uid_make(s, st->n.uid);
-    factory(&st->n, KIND_TILE);
+    factory(&st->n, KIND_TILE, SIM_ACT_RUN);
     st->scan_phase = (uint8_t)rng_range(&s->rng, 0, SIM_SCAN_STEPS - 1);
     for (int k = 0; k < KEYS_N; k++) {
         int spread = (int)rng_range(&s->rng, 0, 2u * (unsigned)s->rest_spread) - s->rest_spread;
@@ -326,8 +353,41 @@ int sim_toward_hub(const sim_t *s, int tile)
 
 /* ----------------------------------------------------------------- frames --- */
 
-/* The transmitter is free: turn the pins round if the link wants them
- * round, and take the next frame. */
+/* How long a byte takes at a rate, in SIM_STEP_TICKS to the step. */
+static int byte_ticks(uint8_t rate)
+{
+    return (int)(4000000u / rate_baud(rate));
+}
+
+/* A frame as the program from before the two rates sent it: its HELLO ended
+ * after the port, its INFO before the rates. What it passes on for others
+ * it passes on whole. */
+static size_t old_frame(const sim_node_t *node, uint32_t id, uint8_t *wire, size_t n)
+{
+    frame_rx_t rx;
+    frame_result_t res = FRAME_NONE;
+    uint8_t type = 0, len = 0, pl[FRAME_MAX_PAYLOAD];
+
+    frame_rx_reset(&rx);
+    for (size_t k = 0; k < n; k++)
+        res = frame_rx_byte(&rx, wire[k], &type, pl, &len);
+    if (res != FRAME_OK)
+        return n;
+    if (type == FT_HELLO && len > HELLO_MIN_LEN)
+        len = HELLO_MIN_LEN;
+    else if (type == FT_INFO && len > INFO_MIN_LEN && get32(pl) == id) {
+        /* and its version is its image's, not this PC's program's */
+        put16(pl + UP_HEAD_LEN, get16(node->chip.mem + (fw_slot_addr(node->slot) - FW_FLASH_BASE) +
+                                      FW_HEADER_AT + FW_H_VERSION));
+        len = INFO_MIN_LEN;
+    } else {
+        return n;
+    }
+    return frame_encode(type, pl, len, wire);
+}
+
+/* The transmitter is free: turn the pins round and change the rate if the
+ * link wants them so, and take the next frame. */
 static void start_frame(sim_t *s, int i, uint8_t pi)
 {
     sim_port_t *p = port_of(s, i, pi);
@@ -336,13 +396,18 @@ static void start_frame(sim_t *s, int i, uint8_t pi)
 
     if (i == SIM_HUB) {
         p->swapped = hub_swapped(&s->hub.h);
+        p->rate = hub_rate(&s->hub.h);
         n = hub_tx(&s->hub.h, tx->wire);
     } else {
         p->swapped = tile_swapped(&s->tile[i].t, pi);
+        p->rate = tile_rate(&s->tile[i].t, pi);
         n = tile_tx(&s->tile[i].t, pi, tx->wire);
     }
     if (!n)
         return;
+    if (node_of(s, i)->act == SIM_ACT_OLD)
+        n = old_frame(node_of(s, i), i == SIM_HUB ? s->hub.h.node.id : s->tile[i].t.node.id,
+                      tx->wire, n);
     tx->len = (uint8_t)n;
     tx->sent = 0;
     tx->lost = false;
@@ -368,31 +433,61 @@ static void start_frame(sim_t *s, int i, uint8_t pi)
         c->lost[d]++;
 }
 
-/* Up to `room` bytes of the port's frame go down the cable. Returns how
- * many went. */
-static int carry(sim_t *s, int i, uint8_t pi, int room)
+static void arrive(sim_t *s, int j, sim_port_t *q, uint8_t byte)
+{
+    if (q->rx_len == SIM_RX_MAX)
+        node_of(s, j)->rx_overruns++;
+    else
+        q->rx[q->rx_len++] = byte;
+}
+
+/* What a UART makes of a byte that was sent at another rate than its own,
+ * or that the cable could not carry: fewer bytes or more, none of them
+ * right, and many a 0x00, which ends a frame. */
+static void rubbish(sim_t *s, int j, sim_port_t *q, uint8_t tx_rate)
+{
+    int mine = byte_ticks(q->rate), theirs = byte_ticks(tx_rate);
+    int n = 1;
+
+    if (theirs < mine) {
+        /* several of theirs go by in the time of one of ours */
+        if (++q->junk < mine / theirs)
+            return;
+        q->junk = 0;
+    } else if (theirs > mine) {
+        n = (int)rng_range(&s->rng, 1, (uint32_t)(theirs / mine));
+    }
+    while (n--)
+        arrive(s, j, q, rng_range(&s->rng, 0, 3) ? (uint8_t)rng_next(&s->rng) : 0);
+}
+
+/* The port's frame goes down the cable for up to `ticks` of time. Returns
+ * how much of that it took. */
+static int carry(sim_t *s, int i, uint8_t pi, int ticks)
 {
     sim_port_t *p = port_of(s, i, pi);
     sim_tx_t *tx = &p->tx;
-    int j = SIM_NOBODY, k = 0;
+    int j = SIM_NOBODY, used = 0, cost = byte_ticks(p->rate);
     uint8_t pj = 0;
 
     sim_port_t *q = far_end(s, p, &j, &pj);
     sim_cable_t *c = p->cable >= 0 ? &s->cable[p->cable] : NULL;
 
-    for (; k < room && tx->sent < tx->len; k++) {
+    for (; used + cost <= ticks && tx->sent < tx->len; used += cost) {
         uint8_t byte = tx->wire[tx->sent++];
         if (!q || tx->lost || !running(node_of(s, j)) || !hears(c, q, p)) {
             tx->whole = false;
-        } else if (q->rx_len == SIM_RX_MAX) {
-            node_of(s, j)->rx_overruns++;
+        } else if (q->rate != p->rate || (p->rate != RATE_BASE && c->fast_dead[p->end])) {
+            rubbish(s, j, q, p->rate);
             tx->whole = false;
         } else {
-            q->rx[q->rx_len++] = byte;
+            if (q->rx_len == SIM_RX_MAX)
+                tx->whole = false;
+            arrive(s, j, q, byte);
         }
     }
     if (tx->sent < tx->len)
-        return k;
+        return ticks;           /* what is left of the step is less than a byte */
 
     /* the frame is out */
     if (c)
@@ -412,17 +507,17 @@ static int carry(sim_t *s, int i, uint8_t pi, int room)
         }
     }
     tx->len = tx->sent = 0;
-    return k;
+    return used;
 }
 
-/* One step of a port's transmitter: ten bytes' worth of time. A frame that
- * ends in the middle of it is followed by the next at once. While the
- * program writes flash, the frame on its way goes on and no new one starts. */
+/* One step of a port's transmitter. A frame that ends in the middle of it
+ * is followed by the next at once. While the program writes flash, the
+ * frame on its way goes on and no new one starts. */
 static void transmit(sim_t *s, int i, uint8_t pi)
 {
     sim_node_t *n = node_of(s, i);
     sim_port_t *p = port_of(s, i, pi);
-    int room = SIM_STEP_BYTES;
+    int room = SIM_STEP_TICKS;
 
     while (room > 0) {
         if (p->tx.len == 0) {

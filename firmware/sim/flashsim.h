@@ -43,6 +43,8 @@ enum {
     SIM_ACT_RUN = 0,
     SIM_ACT_HANG = 1,       /* a program that stops dead at once */
     SIM_ACT_DEAF = 2,       /* one that runs and hears nothing */
+    SIM_ACT_OLD = 3,        /* the program from before cables had two rates: its ports stay at
+                             * the base rate, and its HELLO and INFO end where they did then */
 };
 #define FLASHSIM_IMAGE_MIN  0x300u
 

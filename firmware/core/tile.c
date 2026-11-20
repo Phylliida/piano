@@ -66,6 +66,7 @@ static void send_info(tile_t *t)
     put16(body + 27, (uint16_t)(up > 0xFFFFu ? 0xFFFFu : up));
     put16(body + 29, n->crc_drops);
     put16(body + 31, n->queue_drops);
+    node_rates(n, body + 33);
     node_send_up(&t->node, FT_INFO, body, sizeof body);
 }
 

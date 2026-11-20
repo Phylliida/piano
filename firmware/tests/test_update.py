@@ -33,6 +33,7 @@ import io
 import math
 import os
 import random
+import re
 import shutil
 import struct
 import subprocess
@@ -53,8 +54,16 @@ HUBSIM = os.path.join(HERE, "..", "build", "host", "hubsim")
 REAL_BUILD = os.path.join(HERE, "..", "build")
 
 ACT_AT = 0x210                  # sim/flashsim.h: FLASHSIM_ACT_AT
-RUN, HANG, DEAF = 0, 1, 2       # SIM_ACT_
+RUN, HANG, DEAF, OLD = 0, 1, 2, 3   # SIM_ACT_
 MINUTE = 61000                  # ms: a trial, and a little
+
+# Versions. The simulator's chips start with the program this PC builds,
+# which calls itself FW_VERSION (core/proto.h). The builds the tests make
+# are far from that, so that the next FW_VERSION is none of them.
+with open(os.path.join(HERE, "..", "core", "proto.h")) as f:
+    FACTORY = "%04x" % int(re.search(r"#define FW_VERSION\s+(\w+?)u?\s", f.read()).group(1), 0)
+NEW, NEXT = 0x0102, 0x0103
+BEFORE_RATES = "0001"           # sim.h: SIM_OLD_VERSION, what World(old=True) starts with
 
 # How many times a node's flash is erased or written up to a place in an
 # update (core/fw.c): begin erases the slot's first and last sector and
@@ -85,15 +94,17 @@ Slot = collections.namedtuple("Slot", "state version crc")
 class World:
     """tests/hubsim.c behind its pipe, and the clock."""
 
-    def __init__(self, tiles=1, cables=None, fed=True):
+    def __init__(self, tiles=1, cables=None, fed=True, old=False):
         self.proc = subprocess.Popen([HUBSIM], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      text=True)
         hello = self.proc.stdout.readline().split()
-        if len(hello) != 3 or hello[0] != "hubsim":
+        if len(hello) != 3 or hello[0] != "hubsim" or hello[2] != FACTORY:
             raise AssertionError("hubsim began with %r" % hello)
         self.ids = [hello[1]]
         if tiles > 1:
             self.ids = self.pipe("n %d" % tiles).split()[1:]
+        if old:
+            self.pipe("o")              # programs from before the cables' two rates
         if fed:
             self.pipe("e 1")            # the tiles' power comes through the hub
         if cables is None:
@@ -165,6 +176,20 @@ class World:
         self.run(30)
         self.pipe("p 1 %s" % node)
         self.run(1)
+
+    def console(self, line, ms=20):
+        """What the hub's console answers to a line, typed between two runs
+        of the script."""
+        self.pipe("t " + (line + "\r").encode().hex())
+        self.run(ms)
+        text = bytes(self.to_pc).decode()
+        self.to_pc.clear()
+        return text
+
+    def tiles(self):
+        """The tiles' IDs as the hub's console lists them: in the order of
+        their first words to the hub, which is nobody's to choose."""
+        return re.findall(r"^\d+ ([0-9a-f]{8}) ", self.console("tiles"), re.M)
 
     def chip(self, node):
         w = self.pipe("q %s" % node).split()
@@ -274,8 +299,8 @@ class Case(unittest.TestCase):
         self.out = ""
         self.mark = 0
 
-    def start(self, tiles=1, warm_up=3000, cables=None, fed=True):
-        self.world = World(tiles, cables, fed)
+    def start(self, tiles=1, warm_up=3000, cables=None, fed=True, old=False):
+        self.world = World(tiles, cables, fed, old)
         self.addCleanup(self.world.close)
         self.world.run(warm_up)
         return self.world
@@ -332,7 +357,7 @@ class Case(unittest.TestCase):
         """The node runs what it came with; `other`: slot B's state."""
         chip = self.chip(node)
         self.assertEqual((chip.slot, chip.doing, chip.a.state, chip.a.version),
-                         ("a", "run", "none", "0001"), "node %s: %s\n%s" % (node, chip, self.out))
+                         ("a", "run", "none", FACTORY), "node %s: %s\n%s" % (node, chip, self.out))
         if other:
             self.assertEqual(chip.b.state, other, "node %s: %s\n%s" % (node, chip, self.out))
 
@@ -353,7 +378,7 @@ class UpdateTest(Case):
 
     def test_one_tile_and_the_hub(self):
         w = self.start()
-        new = self.build(2)
+        new = self.build(NEW)
         tile = w.ids[0]
         self.assertEqual(self.run_script(new), 0, self.out)
         self.check_runs(0, new.tile[1])
@@ -368,16 +393,17 @@ class UpdateTest(Case):
         self.assertEqual(self.typed("fw hub begin"), ["fw hub begin %d" % new.hub[1].length])
         self.assertEqual(len(self.typed("fw hub write")), -(-new.hub[1].length // 48))
         self.assertEqual(len(self.typed("fw hub confirm")), 1)
-        for text in ("the tile's program in %s: version 0002, %d bytes"
+        for text in ("the tile's program in %s: version 0102, %d bytes"
                      % (os.path.join(new.dir, "tile"), new.tile[0].length),
-                     "tile %s: runs version 0001 in slot A; gets version 0002 into slot B" % tile,
-                     "the hub: runs version 0001 in slot A; gets version 0002 into slot B",
-                     "sending tile %s version 0002 for its slot B: %d bytes"
+                     "tile %s: runs version %s in slot A; gets version 0102 into slot B"
+                     % (tile, FACTORY),
+                     "the hub: runs version %s in slot A; gets version 0102 into slot B" % FACTORY,
+                     "sending tile %s version 0102 for its slot B: %d bytes"
                      % (tile, new.tile[1].length),
                      "restarting the hub, and the tile with it: its power comes through the "
                      "hub\n",
                      "the hub is back: piano hub, firmware",
-                     "done: 1 tile now runs version 0002 and the hub now runs version 0002"):
+                     "done: 1 tile now runs version 0102 and the hub now runs version 0102"):
             self.assertIn(text, self.out)
         self.assertNotIn("restarting tile", self.out)
         self.assertEqual(len(w.ports), 2)
@@ -385,7 +411,7 @@ class UpdateTest(Case):
 
     def test_a_row_of_tiles(self):
         w = self.start(4)
-        new = self.build(2)
+        new = self.build(NEW)
         self.assertEqual(self.run_script(new), 0, self.out)
         for i in range(4):
             self.check_runs(i, new.tile[1])
@@ -396,7 +422,7 @@ class UpdateTest(Case):
                       "the hub\n", self.out)
         self.assertEqual(sorted(t.split()[1] for t in self.typed("fw") if t.endswith("confirm")),
                          sorted(w.ids + ["hub"]))
-        self.assertIn("done: 4 tiles now run version 0002 and the hub now runs version 0002",
+        self.assertIn("done: 4 tiles now run version 0102 and the hub now runs version 0102",
                       self.out)
 
     def test_tiles_that_branch(self):
@@ -404,7 +430,7 @@ class UpdateTest(Case):
         # one more behind one of those
         w = self.start(5, cables=[(0, "N", 1, "S"), (0, "E", 2, "W"), (0, "S", 3, "N"),
                                   (2, "E", 4, "W")])
-        new = self.build(2)
+        new = self.build(NEW)
         self.assertEqual(self.run_script(new), 0, self.out)
         for i in range(5):
             self.check_runs(i, new.tile[1])
@@ -413,7 +439,7 @@ class UpdateTest(Case):
 
     def test_only_the_tiles(self):
         self.start(2)
-        new = self.build(2)
+        new = self.build(NEW)
         shutil.rmtree(os.path.join(new.dir, "hub"))     # not needed, so not read
         self.assertEqual(self.run_script(new, "--only", "tiles"), 0, self.out)
         self.check_runs(0, new.tile[1])
@@ -424,12 +450,12 @@ class UpdateTest(Case):
         self.assertIn("restarting the tiles\n", self.out)
         self.assertEqual([self.chip(n).reboots for n in (0, 1, "h")], [1, 1, 0])
         self.assertEqual(len(self.world.ports), 1)
-        self.assertIn("done: 2 tiles now run version 0002\n", self.out)
+        self.assertIn("done: 2 tiles now run version 0102\n", self.out)
         self.assertNotIn("the hub:", self.out)
 
     def test_only_the_hub(self):
         w = self.start(2)
-        new = self.build(2)
+        new = self.build(NEW)
         shutil.rmtree(os.path.join(new.dir, "tile"))
         self.assertEqual(self.run_script(new, "--only", "hub"), 0, self.out)
         self.check_runs("h", new.hub[1])
@@ -443,30 +469,30 @@ class UpdateTest(Case):
         self.assertEqual(set(asked), set("fw " + i for i in w.ids))
         self.assertLess(self.typed("fw").index("fw hub"), self.typed("fw").index(asked[0]))
         self.assertIn("the hub sees 2 tiles", self.out)
-        self.assertIn("done: the hub now runs version 0002\n", self.out)
+        self.assertIn("done: the hub now runs version 0102\n", self.out)
 
     def test_again_does_nothing(self):
         w = self.start(2)
-        new = self.build(2)
+        new = self.build(NEW)
         self.assertEqual(self.run_script(new), 0, self.out)
         before = [self.chip(n) for n in (0, 1, "h")]
         self.assertEqual(self.run_script(new), 0, self.out)
         self.assertEqual([self.chip(n) for n in (0, 1, "h")], before)
         self.assertEqual(sorted(self.typed("fw")), sorted("fw " + n for n in w.ids + ["hub"]))
         self.assertEqual(self.typed("reboot"), [])
-        self.assertIn("tile %s: runs version 0002 in slot B, which is this build" % w.ids[1],
+        self.assertIn("tile %s: runs version 0102 in slot B, which is this build" % w.ids[1],
                       self.out)
         self.assertIn("nothing to send: they all run this build", self.out)
 
     def test_the_next_version_goes_into_slot_a(self):
         self.start()
-        second, third = self.build(2), self.build(3)
+        second, third = self.build(NEW), self.build(NEXT)
         self.assertEqual(self.run_script(second), 0, self.out)
         self.assertEqual(self.run_script(third), 0, self.out)
         self.check_runs(0, third.tile[0])
         self.check_runs("h", third.hub[0])
-        self.assertEqual(self.chip(0).b, Slot("good", "0002", "%08x" % second.tile[1].crc))
-        self.assertIn("runs version 0002 in slot B; gets version 0003 into slot A", self.out)
+        self.assertEqual(self.chip(0).b, Slot("good", "0102", "%08x" % second.tile[1].crc))
+        self.assertIn("runs version 0102 in slot B; gets version 0103 into slot A", self.out)
         # and back: an older build is a build like any other
         self.assertEqual(self.run_script(second), 0, self.out)
         self.check_runs(0, second.tile[1])
@@ -474,7 +500,7 @@ class UpdateTest(Case):
 
     def test_only_the_nodes_that_need_it(self):
         self.start(2)
-        new = self.build(2)
+        new = self.build(NEW)
         self.assertEqual(self.run_script(new, "--only", "hub"), 0, self.out)
         self.assertEqual(self.run_script(new), 0, self.out)
         self.assertEqual(self.typed("fw hub begin"), [])
@@ -483,24 +509,24 @@ class UpdateTest(Case):
         self.check_runs(0, new.tile[1])
         self.check_runs(1, new.tile[1])
         self.check_runs("h", new.hub[1])
-        self.assertIn("the hub: runs version 0002 in slot B, which is this build", self.out)
-        self.assertIn("done: 2 tiles now run version 0002\n", self.out)
+        self.assertIn("the hub: runs version 0102 in slot B, which is this build", self.out)
+        self.assertIn("done: 2 tiles now run version 0102\n", self.out)
 
     def test_check_changes_nothing(self):
         w = self.start(2)
-        new = self.build(2)
+        new = self.build(NEW)
         before = [self.chip(n) for n in (0, 1, "h")]
         self.assertEqual(self.run_script(new, "--check"), 0, self.out)
         self.assertEqual([self.chip(n) for n in (0, 1, "h")], before)
         self.assertEqual(sorted(self.typed("fw")), sorted("fw " + n for n in w.ids + ["hub"]))
         self.assertEqual(self.typed("reboot"), [])
-        self.assertIn("tile %s: runs version 0001 in slot A; gets version 0002 into slot B"
-                      % w.ids[1], self.out)
+        self.assertIn("tile %s: runs version %s in slot A; gets version 0102 into slot B"
+                      % (w.ids[1], FACTORY), self.out)
         self.assertIn("--check: nothing was changed", self.out)
 
     def test_hub_only_just_plugged_in(self):
         w = self.start(3, warm_up=0)
-        new = self.build(2)
+        new = self.build(NEW)
         self.assertEqual(self.run_script(new), 0, self.out)
         for i in range(3):
             self.check_runs(i, new.tile[1])
@@ -510,7 +536,7 @@ class UpdateTest(Case):
     def test_cables_are_quiet_from_an_earlier_command(self):
         # tools/flash_tile.py, cut off; the hub forgets its tiles meanwhile
         w = self.start(3)
-        new = self.build(2)
+        new = self.build(NEW)
         port = FakePort(w)
         port.write(b"quiet 3000\r")
         w.run(5)
@@ -525,11 +551,11 @@ class UpdateTest(Case):
         w = self.start(warm_up=0)
         w.power(0, False)
         w.run(4000)
-        new = self.build(2)
+        new = self.build(NEW)
         self.assertEqual(self.run_script(new), 0, self.out)
         self.check_runs("h", new.hub[1])
         self.assertIn("the hub sees no tiles", self.out)
-        self.assertIn("done: the hub now runs version 0002\n", self.out)
+        self.assertIn("done: the hub now runs version 0102\n", self.out)
         self.assertEqual(self.run_script(new), 0, self.out)
         self.assertIn("nothing to send: it runs this build", self.out)
         self.assertEqual(self.run_script(new, "--only", "tiles"), 0, self.out)
@@ -537,12 +563,55 @@ class UpdateTest(Case):
 
     def test_finds_the_hub_by_itself(self):
         self.start()
-        new = self.build(2)
+        new = self.build(NEW)
         looked = []
         self.assertEqual(self.run_script(new, find_hub=lambda: looked.append(1) or "found"), 0,
                          self.out)
         self.assertEqual(len(looked), 2)        # and again after the hub's restart
         self.check_runs("h", new.hub[1])
+
+    def from_before_the_cable_rates(self, fed):
+        # A hub and tiles that know one rate take programs that know two,
+        # and then, the same way, programs that know one again.
+        w = self.start(3, fed=fed, old=True)
+        for node in (0, 1, 2, "h"):
+            self.assertEqual(self.chip(node).a.version, BEFORE_RATES)
+        self.assertNotIn("Mbaud", w.console("info " + w.ids[1], 60))
+
+        new = self.build(NEW)
+        self.assertEqual(self.run_script(new), 0, self.out)
+        self.assertIn("tile %s: runs version %s in slot A; gets version 0102 into slot B"
+                      % (w.ids[2], BEFORE_RATES), self.out)
+        self.assertIn("done: 3 tiles now run version 0102 and the hub now runs version 0102",
+                      self.out)
+        for i in range(3):
+            self.check_runs(i, new.tile[1])
+        self.check_runs("h", new.hub[1])
+        self.assertNotIn("slow:", w.console("grid"))
+        for i, ports in enumerate(("WE", "WE", "W")):
+            info = w.console("info " + w.ids[i], 60)
+            self.assertEqual(re.findall(r"^([WNES]): .*, 4 Mbaud\r?$", info, re.M), list(ports), info)
+        self.assertIn("dropped from a full queue, 4 Mbaud\r\n", w.console("stats"))
+
+        old = self.build(NEXT, tile=OLD, hub=OLD)
+        self.assertEqual(self.run_script(old), 0, self.out)
+        self.assertIn("done: 3 tiles now run version 0103 and the hub now runs version 0103",
+                      self.out)
+        for i in range(3):
+            self.check_runs(i, old.tile[0])
+        self.check_runs("h", old.hub[0])
+        self.assertNotIn("Mbaud", w.console("info " + w.ids[1], 60))
+        self.assertIn("dropped from a full queue, 1 Mbaud\r\n", w.console("stats"))
+        self.assertNotIn("slow:", w.console("grid"))
+        self.assertNotIn("telling it again", self.out)
+        self.check_console()
+
+    def test_keyboard_from_before_the_cable_rates(self):
+        self.from_before_the_cable_rates(fed=True)
+
+    def test_keyboard_from_before_the_cable_rates_on_its_own_power(self):
+        # the tiles restart one by one, each next to neighbours of the other kind
+        self.from_before_the_cable_rates(fed=False)
 
     @unittest.skipUnless(all(os.path.exists(os.path.join(REAL_BUILD, kind, "%s_%s.img" % (kind, s)))
                              for kind in ("tile", "hub") for s in "ab"),
@@ -560,7 +629,7 @@ class UpdateTest(Case):
         w = self.start(3)
         w.pipe("l 0 60")
         w.pipe("l 2 100")
-        new = self.build(2)
+        new = self.build(NEW)
         self.assertEqual(self.run_script(new), 0, self.out)
         for i in range(3):
             self.check_runs(i, new.tile[1])
@@ -568,7 +637,7 @@ class UpdateTest(Case):
 
     def flash_fails(self, node, who, nth, begins, twice=None):
         w = self.start()
-        new = self.build(2)
+        new = self.build(NEW)
         who = who or w.ids[0]
         w.pipe("x %s %d" % (node, nth))
         self.assertEqual(self.run_script(new), 0, self.out)
@@ -591,7 +660,7 @@ class UpdateTest(Case):
                          twice="write %d " % (SECTOR // 48 * 48))
 
     def test_tile_flash_fails_at_the_commit(self):
-        new_len = len(make_image(0, 2, 1))
+        new_len = len(make_image(0, NEW, 1))
         self.flash_fails(0, None, BEGIN_OPS + -(-new_len // 48) + 1 + 1, 2, twice="commit")
 
     def test_hub_flash_fails_at_the_begin(self):
@@ -608,7 +677,7 @@ class UpdateTest(Case):
         # the tile took a write and the script did not hear so: here,
         # because somebody else typed that write a moment before
         w = self.start()
-        new = self.build(2)
+        new = self.build(NEW)
 
         def first():
             w.pipe("t " + (w.typed_lines[-1] + "\r").encode().hex())
@@ -625,7 +694,7 @@ class UpdateTest(Case):
 
     def test_flash_that_keeps_failing(self):
         w = self.start()
-        new = self.build(2)
+        new = self.build(NEW)
         for nth in (1, 2, 3):
             w.when("fw %s begin" % w.ids[0], lambda: w.pipe("x 0 1"), nth)
         self.assertEqual(self.run_script(new), 1, self.out)
@@ -647,7 +716,7 @@ class UpdateTest(Case):
 
     def test_tile_program_that_hangs(self):
         w = self.start(2)
-        bad = self.build(2, tile=HANG)
+        bad = self.build(NEW, tile=HANG)
         self.assertEqual(self.run_script(bad), 1, self.out)
         for i in (0, 1):
             self.assertIn("tile %s started its new program and is back in the old one" % w.ids[i],
@@ -663,10 +732,10 @@ class UpdateTest(Case):
 
         # the same build again: it says so, and tries
         self.assertEqual(self.run_script(bad, "--check"), 0, self.out)
-        self.assertIn("tile %s: runs version 0001 in slot A; gets version 0002 into slot B again: "
-                      "it was started there before\n    and did not stay" % w.ids[0], self.out)
+        self.assertIn("tile %s: runs version %s in slot A; gets version 0102 into slot B again: "
+                      "it was started there before\n    and did not stay" % (w.ids[0], FACTORY), self.out)
         # a build that works goes where the bad one was
-        good = self.build(3)
+        good = self.build(NEXT)
         self.assertEqual(self.run_script(good), 0, self.out)
         self.check_runs(0, good.tile[1])
         self.check_runs(1, good.tile[1])
@@ -674,7 +743,7 @@ class UpdateTest(Case):
 
     def test_tile_program_that_hears_nothing(self):
         w = self.start(2)
-        bad = self.build(2, tile=DEAF)
+        bad = self.build(NEW, tile=DEAF)
         self.assertEqual(self.run_script(bad), 1, self.out)
         for i in (0, 1):
             self.assertIn("tile %s did not come back" % w.ids[i], self.out)
@@ -682,11 +751,11 @@ class UpdateTest(Case):
         self.check_runs(0, bad.tile[1], state="tried")
         w.run(MINUTE)
         self.check_all_old(2)
-        self.assertEqual(self.run_script(self.build(3)), 0, self.out)
+        self.assertEqual(self.run_script(self.build(NEXT)), 0, self.out)
 
     def test_hub_program_that_hangs(self):
         w = self.start(2)
-        bad = self.build(2, hub=HANG)
+        bad = self.build(NEW, hub=HANG)
         self.assertEqual(self.run_script(bad), 1, self.out)
         self.assertIn("the hub is back: piano hub, firmware", self.out)
         self.assertIn("error: the hub started its new program and is back in the old one\n"
@@ -704,11 +773,11 @@ class UpdateTest(Case):
         w.run(MINUTE)
         self.check_all_old(2)
         self.assertEqual([self.chip(i).reboots for i in (0, 1)], [1, 1])
-        self.assertEqual(self.run_script(self.build(3)), 0, self.out)
+        self.assertEqual(self.run_script(self.build(NEXT)), 0, self.out)
 
     def test_hub_program_that_hears_nothing(self):
         w = self.start(2)
-        bad = self.build(2, hub=DEAF)
+        bad = self.build(NEW, hub=DEAF)
         began = w.now()
         self.assertEqual(self.run_script(bad), 1, self.out)
         self.assertIn("the hub is not back yet", self.out)
@@ -725,7 +794,7 @@ class UpdateTest(Case):
 
     def test_hub_that_stays_away(self):
         w = self.start()
-        new = self.build(2)
+        new = self.build(NEW)
         # its power goes as it restarts
         w.when("reboot hub", lambda: w.after(100, lambda: w.pipe("p 0 h")))
         self.assertEqual(self.run_script(new), 1, self.out)
@@ -744,7 +813,7 @@ class UpdateTest(Case):
 
     def test_too_late_to_confirm(self):
         w = self.start()
-        new = self.build(2)
+        new = self.build(NEW)
         with mock.patch.object(update, "CONFIRM_BY", 0.5):
             self.assertEqual(self.run_script(new), 1, self.out)
         self.assertIn("too close to the\nend of their trial to confirm them all in time\n"
@@ -757,7 +826,7 @@ class UpdateTest(Case):
 
     def test_tile_that_did_not_hear_the_restart(self):
         w = self.start(3)
-        new = self.build(2)
+        new = self.build(NEW)
         w.dead_from("reboot all", 2)            # the cable to the last tile
         self.assertEqual(self.run_script(new, "--only", "tiles"), 0, self.out)
         self.assertIn("tile %s did not restart; telling it again" % w.ids[2], self.out)
@@ -768,7 +837,7 @@ class UpdateTest(Case):
 
     def test_no_tile_hears_the_restart(self):
         w = self.start(2)
-        new = self.build(2)
+        new = self.build(NEW)
         w.dead_from("reboot all", 0)            # the hub's own cable
         self.assertEqual(self.run_script(new, "--only", "tiles"), 0, self.out)
         self.assertEqual(self.out.count("restarting the tiles\n"), 1)
@@ -781,7 +850,7 @@ class UpdateTest(Case):
 
     def test_tile_that_never_hears_the_restart(self):
         w = self.start(2)
-        new = self.build(2)
+        new = self.build(NEW)
         w.dead_from("reboot all", 1)
         for nth in range(1, update.KICKS + 1):
             w.dead_from("reboot " + w.ids[1], 1, nth)
@@ -807,7 +876,7 @@ class UpdateTest(Case):
 
     def test_tile_loses_power_while_it_is_sent_its_program(self):
         w = self.start(2)
-        new = self.build(2)
+        new = self.build(NEW)
         w.when("fw %s write" % w.ids[1], lambda: w.power_cycle(1), nth=30)
         self.assertEqual(self.run_script(new), 0, self.out)
         self.assertEqual(len(self.typed("fw %s begin" % w.ids[1])), 2)
@@ -817,7 +886,7 @@ class UpdateTest(Case):
 
     def test_tile_goes_while_it_is_sent_its_program(self):
         w = self.start(2)
-        new = self.build(2)
+        new = self.build(NEW)
         w.when("fw %s write" % w.ids[1], lambda: w.power(1, False), nth=30)
         self.assertEqual(self.run_script(new), 1, self.out)
         self.assertRegex(self.out, "error: tile %s (stopped answering|left the hub's list) while "
@@ -831,18 +900,18 @@ class UpdateTest(Case):
         w.run(4000)
         self.assertEqual(self.run_script(new), 0, self.out)
         self.assertEqual(self.typed("fw %s begin" % w.ids[0]), [])
-        self.assertIn("tile %s: runs version 0001 in slot A; holds version 0002 for slot B "
-                      "already, not started yet" % w.ids[0], self.out)
+        self.assertIn("tile %s: runs version %s in slot A; holds version 0102 for slot B "
+                      "already, not started yet" % (w.ids[0], FACTORY), self.out)
         self.check_runs(0, new.tile[1])
         self.check_runs("h", new.hub[1])
 
     def test_tile_goes_while_it_is_asked(self):
         w = self.start(2)
-        new = self.build(2)
+        new = self.build(NEW)
         w.when("fw " + w.ids[1], lambda: w.power(1, False))
         self.assertEqual(self.run_script(new), 1, self.out)
         self.assertIn("tile %s: was in the hub's list and has left it" % w.ids[1], self.out)
-        self.assertIn("done: 1 tile now runs version 0002 and the hub now runs version 0002\n"
+        self.assertIn("done: 1 tile now runs version 0102 and the hub now runs version 0102\n"
                       "error: not updated, for what it says above: tile %s\n" % w.ids[1],
                       self.out)
         self.check_runs(0, new.tile[1])
@@ -850,7 +919,7 @@ class UpdateTest(Case):
 
     def test_tile_restarts_before_it_is_told_to(self):
         w = self.start(2)
-        new = self.build(2)
+        new = self.build(NEW)
         # its power goes and comes back when it has just taken the program
         w.when("fw %s commit" % w.ids[1],
                lambda: w.when("fw " + w.ids[1], lambda: w.power_cycle(1)))
@@ -870,7 +939,7 @@ class UpdateTest(Case):
 
     def test_tile_loses_power_before_it_is_confirmed(self):
         w = self.start(2)
-        new = self.build(2)
+        new = self.build(NEW)
         # a program on trial is not started a second time
         w.when("fw %s confirm" % w.ids[1], lambda: w.power_cycle(1))
         self.assertEqual(self.run_script(new), 1, self.out)
@@ -883,29 +952,33 @@ class UpdateTest(Case):
         self.assertEqual(self.typed("reboot"), ["reboot " + w.ids[1]])
         for i in (0, 1):
             self.check_runs(i, new.tile[1])
-        self.assertIn("done: 1 tile now runs version 0002\n", self.out)
+        self.assertIn("done: 1 tile now runs version 0102\n", self.out)
 
     def test_tile_on_trial_is_not_restarted_with_the_others(self):
         # tiles 1 and 2 each on a side of tile 0, where the hub's cable is
         w = self.start(3, cables=[(0, "N", 1, "S"), (0, "E", 2, "W")])
-        new = self.build(2)
-        # tile 2's power goes and comes back as the last tile, which is
-        # tile 1, has its program whole: tile 2 starts its own, and a
-        # `reboot all` would be the end of that
-        w.when("fw %s commit" % w.ids[1], lambda: w.power_cycle(2))
+        new = self.build(NEW)
+        # The power of one of the two goes and comes back as the last tile
+        # of the hub's list has its program whole: that one starts its own,
+        # and a `reboot all` would be the end of that
+        order = w.tiles()
+        self.assertEqual(sorted(order), sorted(w.ids))
+        cycled = 1 if order[-1] == w.ids[2] else 2
+        others = [t for t in order if t != w.ids[cycled]]
+        w.when("fw %s commit" % order[-1], lambda: w.power_cycle(cycled))
         self.assertEqual(self.run_script(new, "--only", "tiles"), 0, self.out)
-        self.assertEqual([t.split()[1] for t in self.typed("fw") if t.endswith(" commit")],
-                         [w.ids[0], w.ids[2], w.ids[1]])
-        self.assertEqual(self.typed("reboot"), ["reboot " + w.ids[0], "reboot " + w.ids[1]])
-        self.assertEqual([self.chip(i).reboots for i in range(3)], [1, 1, 0])
+        self.assertEqual([t.split()[1] for t in self.typed("fw") if t.endswith(" commit")], order)
+        self.assertEqual(self.typed("reboot"), ["reboot " + t for t in others])
+        self.assertEqual([self.chip(i).reboots for i in range(3)],
+                         [int(i != cycled) for i in range(3)])
         for i in range(3):
             self.check_runs(i, new.tile[1])
-        self.assertIn("restarting tile %s\nrestarting tile %s\n" % (w.ids[0], w.ids[1]), self.out)
+        self.assertIn("restarting tile %s\nrestarting tile %s\n" % tuple(others), self.out)
         self.assertNotIn("telling it again", self.out)
 
     def test_tile_goes_as_the_tiles_restart(self):
         w = self.start(2)
-        new = self.build(2)
+        new = self.build(NEW)
         w.when("reboot all", lambda: w.power(1, False))
         self.assertEqual(self.run_script(new, "--only", "tiles"), 1, self.out)
         self.assertIn("error: tile %s did not come back\nNothing was confirmed" % w.ids[1],
@@ -918,7 +991,7 @@ class UpdateTest(Case):
 
     def test_tile_goes_at_the_restart(self):
         w = self.start(2)
-        new = self.build(2)
+        new = self.build(NEW)
         w.when("reboot hub", lambda: w.power(1, False))
         self.assertEqual(self.run_script(new), 1, self.out)
         self.assertIn("error: tile %s did not come back\nNothing was confirmed" % w.ids[1],
@@ -933,7 +1006,7 @@ class UpdateTest(Case):
         # the hub's new program has to find every tile again, also one that
         # got no program
         w = self.start(2)
-        new = self.build(2)
+        new = self.build(NEW)
         w.when("reboot hub", lambda: w.power(1, False))
         self.assertEqual(self.run_script(new, "--only", "hub"), 1, self.out)
         self.assertIn("error: tile %s did not come back\nNothing was confirmed" % w.ids[1],
@@ -945,7 +1018,7 @@ class UpdateTest(Case):
 
     def test_hub_loses_power_while_it_sends(self):
         w = self.start(2)
-        new = self.build(2)
+        new = self.build(NEW)
         w.when("fw %s write" % w.ids[1], lambda: w.power_cycle("h"), nth=30)
         self.assertEqual(self.run_script(new), 1, self.out)
         self.assertIn("error: the hub's serial port has gone (Input/output error)\n"
@@ -966,12 +1039,12 @@ class UpdateTest(Case):
 
     def test_tile_from_before_the_bootloader(self):
         w = self.start(2)
-        new = self.build(2)
+        new = self.build(NEW)
         w.pipe("u 1")
         self.assertEqual(self.run_script(new), 1, self.out)
         self.assertIn("tile %s: its program knows nothing of slots" % w.ids[1], self.out)
         self.assertIn("build/tile/tile_factory.bin", self.out)
-        self.assertIn("done: 1 tile now runs version 0002 and the hub now runs version 0002\n"
+        self.assertIn("done: 1 tile now runs version 0102 and the hub now runs version 0102\n"
                       "error: not updated, for what it says above: tile %s\n" % w.ids[1],
                       self.out)
         self.check_runs(0, new.tile[1])
@@ -982,12 +1055,12 @@ class UpdateTest(Case):
 
     def test_hub_from_before_the_bootloader(self):
         w = self.start(2)
-        new = self.build(2)
+        new = self.build(NEW)
         w.pipe("u h")
         self.assertEqual(self.run_script(new), 1, self.out)
         self.assertIn("the hub: its program knows nothing of slots", self.out)
         self.assertIn("build/hub/hub_factory.bin once, over USB DFU", self.out)
-        self.assertIn("done: 2 tiles now run version 0002\n"
+        self.assertIn("done: 2 tiles now run version 0102\n"
                       "error: not updated, for what it says above: the hub\n", self.out)
         self.check_runs(0, new.tile[1])
         self.check_runs(1, new.tile[1])
@@ -1000,7 +1073,7 @@ class UpdateTest(Case):
 
     def test_stopped_while_it_sends(self):
         w = self.start(2)
-        new = self.build(2)
+        new = self.build(NEW)
         w.when("fw %s write" % w.ids[1], stop, nth=30)
         self.assertEqual(self.run_script(new), 130, self.out)
         self.assertTrue(self.out.endswith("stopped\n" + update.NOT_RESTARTED + "\n"), self.out)
@@ -1016,7 +1089,7 @@ class UpdateTest(Case):
 
     def test_stopped_before_the_restart(self):
         w = self.start(2)
-        new = self.build(2)
+        new = self.build(NEW)
         w.when("reboot", stop)
         self.assertEqual(self.run_script(new), 130, self.out)
         for n in (0, 1, "h"):
@@ -1024,8 +1097,8 @@ class UpdateTest(Case):
             self.assertEqual(self.chip(n).reboots, 0)
         self.assertEqual(self.run_script(new), 0, self.out)
         self.assertEqual([t for t in self.typed("fw") if " begin" in t or " write" in t], [])
-        self.assertIn("the hub: runs version 0001 in slot A; holds version 0002 for slot B "
-                      "already, not started yet", self.out)
+        self.assertIn("the hub: runs version %s in slot A; holds version 0102 for slot B "
+                      "already, not started yet" % FACTORY, self.out)
         for i in (0, 1):
             self.check_runs(i, new.tile[1])
         self.check_runs("h", new.hub[1])
@@ -1033,7 +1106,7 @@ class UpdateTest(Case):
     def stopped_after_the_restart(self, tiles=2):
         """A run that is cut off when the new programs have just started."""
         w = self.start(tiles)
-        new = self.build(2)
+        new = self.build(NEW)
         w.when("reboot hub", lambda: w.when("fw", stop))
         self.assertEqual(self.run_script(new), 130, self.out)
         self.assertTrue(self.out.endswith("stopped\n" + update.ON_TRIAL + "\n"), self.out)
@@ -1045,7 +1118,7 @@ class UpdateTest(Case):
     def test_stopped_after_the_restart(self):
         w, new = self.stopped_after_the_restart()
         self.assertEqual(self.run_script(new), 0, self.out)
-        self.assertIn("tile %s: is trying this build (version 0002, slot B) and was not "
+        self.assertIn("tile %s: is trying this build (version 0102, slot B) and was not "
                       "confirmed yet" % w.ids[0], self.out)
         self.assertIn("tile %s: confirmed" % w.ids[0], self.out)
         self.assertIn("the hub: confirmed", self.out)
@@ -1067,14 +1140,14 @@ class UpdateTest(Case):
     def test_check_confirms_nothing(self):
         w, new = self.stopped_after_the_restart(1)
         self.assertEqual(self.run_script(new, "--check"), 0, self.out)
-        self.assertIn("the hub: is trying this build (version 0002, slot B)", self.out)
+        self.assertIn("the hub: is trying this build (version 0102, slot B)", self.out)
         self.assertEqual([t for t in self.typed("fw") if t.endswith("confirm")], [])
         w.run(MINUTE)
         self.check_all_old(1)
 
     def test_stopped_while_it_confirms(self):
         w = self.start(2)
-        new = self.build(2)
+        new = self.build(NEW)
         w.when("fw hub confirm", stop)
         self.assertEqual(self.run_script(new), 130, self.out)
         self.assertTrue(self.out.endswith("stopped\n" + update.HALF_CONFIRMED + "\n"), self.out)
@@ -1086,10 +1159,10 @@ class UpdateTest(Case):
 
     def test_another_build_is_on_trial(self):
         w, _ = self.stopped_after_the_restart()
-        third = self.build(3)
+        third = self.build(NEXT)
         before = [self.chip(n) for n in (0, 1, "h")]
         self.assertEqual(self.run_script(third), 1, self.out)
-        self.assertIn("tile %s: is trying a program that is not this build (version 0002, slot B)"
+        self.assertIn("tile %s: is trying a program that is not this build (version 0102, slot B)"
                       % w.ids[1], self.out)
         self.assertIn("error: tile %s, tile %s, the hub are trying a program that is not this "
                       "build" % tuple(w.ids), self.out)
@@ -1104,14 +1177,14 @@ class UpdateTest(Case):
 
     def test_a_program_of_another_build_that_waits_for_a_restart(self):
         w = self.start()
-        second, third = self.build(2), self.build(3)
+        second, third = self.build(NEW), self.build(NEXT)
         self.assertEqual(self.run_script(second), 0, self.out)
         w.when("reboot", stop)
         self.assertEqual(self.run_script(third), 130, self.out)
-        self.assertEqual(self.chip(0).a, Slot("new", "0003", "%08x" % third.tile[0].crc))
+        self.assertEqual(self.chip(0).a, Slot("new", "0103", "%08x" % third.tile[0].crc))
         # the second build after all: what waits in slot A must not start
         self.assertEqual(self.run_script(second), 0, self.out)
-        self.assertIn("tile %s: runs version 0002 in slot B, which is this build; holds another "
+        self.assertIn("tile %s: runs version 0102 in slot B, which is this build; holds another "
                       "program in slot A\n    that it would start at its next restart" % w.ids[0],
                       self.out)
         self.assertIn("tile %s: the other program it held is gone" % w.ids[0], self.out)
@@ -1138,7 +1211,7 @@ class OwnPowerTest(Case):
 
     def test_one_tile_and_the_hub(self):
         w = self.start()
-        new = self.build(2)
+        new = self.build(NEW)
         self.assertEqual(self.run_script(new), 0, self.out)
         self.check_runs(0, new.tile[1])
         self.check_runs("h", new.hub[1])
@@ -1149,7 +1222,7 @@ class OwnPowerTest(Case):
 
     def test_a_row_of_tiles(self):
         self.start(4)
-        new = self.build(2)
+        new = self.build(NEW)
         self.assertEqual(self.run_script(new), 0, self.out)
         for i in range(4):
             self.check_runs(i, new.tile[1])
@@ -1160,7 +1233,7 @@ class OwnPowerTest(Case):
 
     def test_tile_that_did_not_hear_the_restart(self):
         w = self.start(3)
-        new = self.build(2)
+        new = self.build(NEW)
         w.dead_from("reboot all", 2)            # the cable to the last tile
         self.assertEqual(self.run_script(new), 0, self.out)
         self.assertIn("tile %s did not restart; telling it again" % w.ids[2], self.out)
@@ -1174,10 +1247,10 @@ class OwnPowerTest(Case):
         # it keeps its power and its program, and after the hub's restart it
         # still cannot say what it runs: that it answers is enough
         w = self.start(2)
-        new = self.build(2)
+        new = self.build(NEW)
         w.pipe("u 1")
         self.assertEqual(self.run_script(new), 1, self.out)
-        self.assertIn("done: 1 tile now runs version 0002 and the hub now runs version 0002\n"
+        self.assertIn("done: 1 tile now runs version 0102 and the hub now runs version 0102\n"
                       "error: not updated, for what it says above: tile %s\n" % w.ids[1],
                       self.out)
         self.assertEqual(self.typed("reboot"), ["reboot hub", "reboot " + w.ids[0]])
@@ -1191,10 +1264,10 @@ class OwnPowerTest(Case):
         # two tiles wait to be restarted, and the third says a word where the
         # others say what they run
         w = self.start(3)
-        new = self.build(2)
+        new = self.build(NEW)
         w.pipe("u 2")
         self.assertEqual(self.run_script(new), 1, self.out)
-        self.assertIn("done: 2 tiles now run version 0002 and the hub now runs version 0002\n"
+        self.assertIn("done: 2 tiles now run version 0102 and the hub now runs version 0102\n"
                       "error: not updated, for what it says above: tile %s\n" % w.ids[2],
                       self.out)
         self.assertEqual(self.typed("reboot"), ["reboot hub", "reboot all"])
@@ -1205,7 +1278,7 @@ class OwnPowerTest(Case):
 
     def test_tile_program_that_hangs(self):
         w = self.start(2)
-        bad = self.build(2, tile=HANG)
+        bad = self.build(NEW, tile=HANG)
         self.assertEqual(self.run_script(bad), 1, self.out)
         for i in (0, 1):
             self.assertIn("tile %s started its new program and is back in the old one" % w.ids[i],
@@ -1219,7 +1292,7 @@ class OwnPowerTest(Case):
 
     def test_hub_program_that_hangs(self):
         w = self.start(2)
-        bad = self.build(2, hub=HANG)
+        bad = self.build(NEW, hub=HANG)
         self.assertEqual(self.run_script(bad), 1, self.out)
         self.assertIn("error: the hub started its new program and is back in the old one\n"
                       "Nothing was confirmed", self.out)
@@ -1230,11 +1303,11 @@ class OwnPowerTest(Case):
         for i in (0, 1):
             self.check_old(i, other="new")
             self.assertEqual(self.chip(i).reboots, 0)
-        self.assertEqual(self.run_script(self.build(3)), 0, self.out)
+        self.assertEqual(self.run_script(self.build(NEXT)), 0, self.out)
 
     def test_stopped_after_the_hub_restarted(self):
         w = self.start(2)
-        new = self.build(2)
+        new = self.build(NEW)
         w.when("reboot hub", lambda: w.when("fw", stop))
         self.assertEqual(self.run_script(new), 130, self.out)
         self.assertTrue(self.out.endswith("stopped\n" + update.ON_TRIAL + "\n"), self.out)
@@ -1279,34 +1352,34 @@ class FilesTest(Case):
                       % os.path.join(build.dir, "tile", "tile_a.img"), out)
 
     def test_one_file_missing(self):
-        build = self.build(2)
+        build = self.build(NEW)
         os.remove(self.path(build, "hub_b.img"))
         self.assertIn("cannot read %s" % self.path(build, "hub_b.img"), self.refused(build))
         self.assertIn("`make hub` builds it", self.refused(build, "--only", "hub"))
 
     def test_not_an_image(self):
-        build = self.build(2)
-        self.put(build, "tile_b.img", make_image(0, 2, 1)[:-4])
+        build = self.build(NEW)
+        self.put(build, "tile_b.img", make_image(0, NEW, 1)[:-4])
         self.assertIn("error: %s is not a program image: " % self.path(build, "tile_b.img"),
                       self.refused(build))
 
     def test_the_other_kind(self):
-        build = self.build(2)
-        self.put(build, "tile_a.img", make_image(1, 2, 0))
+        build = self.build(NEW)
+        self.put(build, "tile_a.img", make_image(1, NEW, 0))
         self.assertIn("tile_a.img holds a hub program, not the tile's", self.refused(build))
-        build = self.build(3)
-        self.put(build, "hub_b.img", make_image(0, 3, 1))
+        build = self.build(NEXT)
+        self.put(build, "hub_b.img", make_image(0, NEXT, 1))
         self.assertIn("hub_b.img holds a tile program, not the hub's", self.refused(build))
 
     def test_the_other_slot(self):
-        build = self.build(2)
-        self.put(build, "tile_a.img", make_image(0, 2, 1))
+        build = self.build(NEW)
+        self.put(build, "tile_a.img", make_image(0, NEW, 1))
         self.assertIn("tile_a.img is linked for slot B", self.refused(build))
 
     def test_two_builds(self):
-        build = self.build(2)
-        self.put(build, "hub_b.img", make_image(1, 3, 1))
-        self.assertIn("hub_a.img is version 0002 and %s is version 0003: not one build"
+        build = self.build(NEW)
+        self.put(build, "hub_b.img", make_image(1, NEXT, 1))
+        self.assertIn("hub_a.img is version 0102 and %s is version 0103: not one build"
                       % self.path(build, "hub_b.img"), self.refused(build))
 
 
@@ -1372,7 +1445,7 @@ class ConsoleTest(Case):
         if set_dtr:
             self.port.set_dtr = set_dtr
         out = io.StringIO()
-        build = self.build(2)
+        build = self.build(NEW)
         with mock.patch.object(flash_tile, "now", clock.now), \
                 mock.patch.object(flash_tile, "sleep", clock.sleep):
             code = update.main(["--port", "fake", "--build", build.dir] + list(args),

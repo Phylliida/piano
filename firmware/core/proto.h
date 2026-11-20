@@ -8,7 +8,7 @@
 #include <stdint.h>
 
 #define PROTO_VERSION      1
-#define FW_VERSION         0x0001u      /* reported in INFO */
+#define FW_VERSION         0x0002u      /* reported in INFO. 2: cables at two rates */
 
 /* ---- frames ---- */
 #define FRAME_MAX_PAYLOAD  60
@@ -38,14 +38,42 @@ enum { PORT_W = 0, PORT_N = 1, PORT_E = 2, PORT_S = 3, TILE_PORTS = 4 };
 #define ID_NONE            0u
 #define ID_ALL             0xFFFFFFFFu
 
+/* ---- cable speeds ---- */
+/* The codes HELLO and INFO use. Every port starts at RATE_BASE; two ports
+ * that both can go faster agree on it (DESIGN.md, "How fast"). */
+enum { RATE_1M = 0, RATE_4M = 1, RATE_COUNT = 2 };
+#define RATE_BASE          RATE_1M
+#define RATE_MAX           RATE_4M      /* the fastest this program's ports offer */
+
+static inline uint32_t rate_baud(uint8_t rate)
+{
+    return rate == RATE_4M ? 4000000u : 1000000u;
+}
+
 /* ---- payload sizes ---- */
-#define HELLO_LEN          7
+#define HELLO_MIN_LEN      7            /* a program from before the two speeds says this much */
+#define HELLO_LEN          8
+/* HELLO's last byte. Without it: 0. */
+#define HELLO_CAN(b)       ((b) & 0x03u)            /* the fastest rate the sender's port offers */
+#define HELLO_NOW(b)       (((b) >> 2) & 0x03u)     /* the rate this HELLO is sent at */
+#define HELLO_BACK         0x20u        /* at the base rate again after a try: answer with a HELLO */
+#define HELLO_ASK          0x40u        /* answer this: at the base rate with GO, else with a HELLO */
+#define HELLO_GO           0x80u        /* the last thing said at this rate: the faster one is next */
 #define BEACON_LEN         8
 #define CMD_HEAD_LEN       6            /* target, counter, op */
 #define CMD_MAX_ARGS       (FRAME_MAX_PAYLOAD - CMD_HEAD_LEN)
 #define REPLY_MAX_DATA     18           /* what follows the counter and the status */
 #define UP_HEAD_LEN        4            /* the writer's ID */
-#define INFO_LEN           (UP_HEAD_LEN + 33)
+#define INFO_MIN_LEN       (UP_HEAD_LEN + 33)   /* without the last two bytes, about the rates */
+#define INFO_LEN           (UP_HEAD_LEN + 35)
+/* INFO's last two bytes hold two bits for each port, port 0 lowest: the
+ * port's rate, and why it is not the fastest. */
+enum {
+    SLOW_NOT = 0,           /* it is, or nobody is there, or the asking is still to come */
+    SLOW_NBR = 1,           /* the neighbour offers no more */
+    SLOW_RETRY = 2,         /* a try failed: the next comes in a while */
+    SLOW_GAVE_UP = 3,       /* RATE_TRIES tries failed: no more with this neighbour */
+};
 #define STATE_LEN          (UP_HEAD_LEN + 6)
 #define NOTE_LEN           (UP_HEAD_LEN + 4)
 #define POS_MAX_PAIRS      28
@@ -83,6 +111,18 @@ enum {
 #define DWELL_MAX_MS       500
 #define LINK_UP_MS         350
 #define RX_GAP_MS          3      /* a frame stalled this long is thrown away */
+
+#define RATE_HOLD_MS       5      /* after asking: this long for the GO, before asking where it is */
+#define RATE_FRESH_MS      3      /* a program that stood still this long does not answer with GO:
+                                   * what it was asked may be older than RATE_HOLD_MS */
+#define RATE_GUARD_MS      2      /* after a GO: this long for the other end to change its rate */
+#define RATE_CALL_MS       2      /* ... then a HELLO this often, until both ends know they are heard */
+#define RATE_TRY_MS        100    /* not that far this long after the change: back to the base rate */
+#define RATE_BACK_MS       150    /* ... and holding frames back there at most this long, for the
+                                   * other end to say it is back too: longer than its RATE_TRY_MS */
+#define RATE_RETRY_MS      2000   /* after a try that failed, before the next */
+#define RATE_PROVEN_MS     1000   /* a faster link that lasted this long worked */
+#define RATE_TRIES         4      /* tries in a row that failed with one neighbour: no more */
 
 #define BEACON_PERIOD_MS   50
 #define HUB_START_MS       750    /* a hub's first beacon: after every tile forgot the last hub */
